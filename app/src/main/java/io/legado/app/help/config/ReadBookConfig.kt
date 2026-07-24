@@ -124,16 +124,19 @@ object ReadBookConfig {
 
     fun save() {
         Coroutine.async {
-            synchronized(this) {
-                GSON.toJson(configList).let {
-                    FileUtils.delete(configFilePath)
-                    FileUtils.createFileIfNotExist(configFilePath).writeText(it)
-                }
-                GSON.toJson(shareConfig).let {
-                    FileUtils.delete(shareConfigFilePath)
-                    FileUtils.createFileIfNotExist(shareConfigFilePath).writeText(it)
-                }
-            }
+            saveNow()
+        }
+    }
+
+    @Synchronized
+    internal fun saveNow() {
+        GSON.toJson(configList).let {
+            FileUtils.delete(configFilePath)
+            FileUtils.createFileIfNotExist(configFilePath).writeText(it)
+        }
+        GSON.toJson(shareConfig).let {
+            FileUtils.delete(shareConfigFilePath)
+            FileUtils.createFileIfNotExist(shareConfigFilePath).writeText(it)
         }
     }
 
@@ -340,6 +343,12 @@ object ReadBookConfig {
             config.underlineMode = value
         }
 
+    var reviewIconColor: Int
+        get() = config.reviewIconColor
+        set(value) {
+            config.reviewIconColor = value
+        }
+
     var paddingBottom: Int
         get() = config.paddingBottom
         set(value) {
@@ -466,6 +475,7 @@ object ReadBookConfig {
             exportConfig.tipColor = shareConfig.tipColor
             exportConfig.headerMode = shareConfig.headerMode
             exportConfig.footerMode = shareConfig.footerMode
+            exportConfig.reviewIconColor = shareConfig.reviewIconColor
         }
         return exportConfig
     }
@@ -574,6 +584,7 @@ object ReadBookConfig {
         var titleBottomSpacing: Int = 0,
         var paragraphIndent: String = "　　",//段落缩进
         var underlineMode: Int = 0, //下划线
+        var reviewIconColor: Int = 0, //段评内置图标颜色(0=跟随主题)
         var paddingBottom: Int = 6,
         var paddingLeft: Int = 16,
         var paddingRight: Int = 16,
@@ -869,6 +880,7 @@ object ReadBookConfig {
             "titleBottomSpacing" to titleBottomSpacing,
             "paragraphIndent" to paragraphIndent,
             "underlineMode" to underlineMode,
+            "reviewIconColor" to reviewIconColor,
             "paddingBottom" to paddingBottom,
             "paddingLeft" to paddingLeft,
             "paddingRight" to paddingRight,

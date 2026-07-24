@@ -20,7 +20,9 @@ import io.legado.app.help.JsExtensions
 import io.legado.app.help.http.BackstageWebView
 import io.legado.app.help.http.CookieStore
 import io.legado.app.help.source.getShareScope
+import io.legado.app.help.source.getSharedGlobalStateKey
 import io.legado.app.model.Debug
+import io.legado.app.model.SharedJsScope
 import io.legado.app.model.webBook.WebBook
 import io.legado.app.utils.GSON
 import io.legado.app.utils.GSONStrict
@@ -39,8 +41,10 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.apache.commons.text.StringEscapeUtils
 import org.jsoup.nodes.Node
-import org.mozilla.javascript.NativeObject
-import org.mozilla.javascript.Scriptable
+import org.htmlunit.corejs.javascript.NativeArray
+import org.htmlunit.corejs.javascript.NativeObject
+import org.htmlunit.corejs.javascript.Scriptable
+import org.htmlunit.corejs.javascript.TopLevel
 import java.lang.ref.WeakReference
 import java.net.URL
 import java.util.Locale
@@ -79,7 +83,8 @@ class AnalyzeRule(
     private val stringRuleCache = hashMapOf<String, List<SourceRule>>()
     private val regexCache = hashMapOf<String, Regex?>()
     private val scriptCache = hashMapOf<String, CompiledScript>()
-    private var topScopeRef: WeakReference<Scriptable>? = null
+    private val localBindings = HashMap<String, String>()
+    private var topScopeRef: WeakReference<TopLevel>? = null
     private var evalJSCallCount = 0
 
     private var coroutineContext: CoroutineContext = EmptyCoroutineContext
@@ -412,6 +417,36 @@ class AnalyzeRule(
     /**
      * 获取列表
      */
+    internal fun getElementsRaw(ruleStr: String): Any? {
+        var result: Any? = null
+        val content = this.content
+        val ruleList = splitSourceRule(ruleStr, true)
+        if (content != null && ruleList.isNotEmpty()) {
+            result = content
+            for (sourceRule in ruleList) {
+                putRule(sourceRule.putMap)
+                result ?: continue
+                val rule = sourceRule.rule
+                result = when (sourceRule.mode) {
+                    Mode.Regex -> AnalyzeByRegex.getElements(
+                        result.toString(),
+                        rule.splitNotBlank("&&")
+                    )
+
+                    Mode.WebJs -> GSON.fromJsonArray<Map<String, Any?>>(
+                        getWebJsResult(rule, result)
+                    ).getOrNull()
+
+                    Mode.Js -> evalJS(rule, result)
+                    Mode.Json -> getAnalyzeByJSonPath(result).getList(rule)
+                    Mode.XPath -> getAnalyzeByXPath(result).getElements(rule)
+                    else -> getAnalyzeByJSoup(result).getElements(rule)
+                }
+            }
+        }
+        return result
+    }
+
     @Suppress("UNCHECKED_CAST")
     fun getElements(ruleStr: String): List<Any> {
         var result: Any? = null
@@ -437,8 +472,29 @@ class AnalyzeRule(
                 }
             }
         }
-        result?.let {
-            return it as List<Any>
+        when (val value = result) {
+            is List<*> -> {
+                if (value.none { it == null || it === Scriptable.NOT_FOUND }) {
+                    @Suppress("UNCHECKED_CAST")
+                    return value as List<Any>
+                }
+                return value.mapNotNull { it?.takeUnless { item -> item === Scriptable.NOT_FOUND } }
+            }
+
+            is Array<*> -> {
+                return value.mapNotNull { it?.takeUnless { item -> item === Scriptable.NOT_FOUND } }
+            }
+
+            is NativeArray -> {
+                val values = ArrayList<Any>(value.length.toInt())
+                for (index in 0 until value.length.toInt()) {
+                    val item = value.get(index, value)
+                    if (item != null && item !== Scriptable.NOT_FOUND) {
+                        values.add(item)
+                    }
+                }
+                return values
+            }
         }
         return ArrayList()
     }
@@ -806,10 +862,16 @@ class AnalyzeRule(
         return value
     }
 
+    fun setLocal(key: String, value: String): AnalyzeRule {
+        localBindings[key] = value
+        return this
+    }
+
     /**
      * 获取保存的数据
      */
     fun get(key: String): String {
+        localBindings[key]?.let { return it }
         when (key) {
             "bookName" -> book?.let {
                 return it.name
@@ -844,17 +906,25 @@ class AnalyzeRule(
             bindings["nextChapterUrl"] = nextChapterUrl
             bindings["rssArticle"] = rssArticle
             bindings["fromBookInfo"] = isFromBookInfo
+            localBindings["paraIndex"]?.let { bindings["paraIndex"] = it }
+            localBindings["paraData"]?.let { bindings["paraData"] = it }
+            localBindings["page"]?.let { bindings["page"] = it.toIntOrNull() ?: it }
         }
-        val topScope = source?.getShareScope(coroutineContext) ?: topScopeRef?.get()
+        val sharedGlobalStateKey = source?.getSharedGlobalStateKey()
+        val topScope: TopLevel? = source?.getShareScope(coroutineContext)
+            ?: topScopeRef?.get()
+            ?: SharedJsScope.getCryptoScope(source ?: this, coroutineContext)
         val scope = if (topScope == null) {
-            RhinoScriptEngine.getRuntimeScope(bindings).apply {
-                if (evalJSCallCount++ > 16) {
-                    topScopeRef = WeakReference(prototype)
-                }
+            val fresh = RhinoScriptEngine.newStandardTopLevel()
+            if (evalJSCallCount++ > 16) {
+                topScopeRef = WeakReference(fresh)
+            }
+            bindings.apply {
+                chainTo(fresh)
             }
         } else {
             bindings.apply {
-                prototype = topScope
+                chainTo(topScope, sharedGlobalStateKey)
             }
         }
         val script = compileScriptCache(jsStr)

@@ -68,6 +68,17 @@ android {
         versionCode = versionCodeValue
         versionName version
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        // Keep app translations while dropping unused transitive dependency locales.
+        resourceConfigurations += [
+                'en',
+                'es-rES',
+                'ja-rJP',
+                'pt-rBR',
+                'vi',
+                'zh',
+                'zh-rHK',
+                'zh-rTW'
+        ]
         project.ext.set("archivesBaseName", name + "_" + version)
 
         if (armOnly) {
@@ -151,6 +162,16 @@ android {
     }
     packaging {
         resources.excludes.add('META-INF/*')
+        // R8 removes the transcode implementation; these bundled resources have no runtime reader.
+        resources.excludes.addAll([
+                'tables/Transcoder_*.bin',
+                '*.proto',
+                '**/*.proto',
+                'src/**',
+                // kotlin-reflect and its builtins loaders are not part of the release runtime.
+                'kotlin/*.kotlin_builtins',
+                'kotlin/**/*.kotlin_builtins'
+        ])
         jniLibs {
             // These dependencies already ship stripped; skip redundant strip attempts.
             keepDebugSymbols += [
@@ -240,7 +261,9 @@ dependencies {
 
     //videoPlayer
     implementation(libs.gsyVideoPlayer.java)
-    implementation(libs.gsyVideoPlayer.exo2)
+    implementation(libs.gsyVideoPlayer.exo2) {
+        exclude(group: 'androidx.media3', module: 'media3-cast')
+    }
     //弹幕
     implementation (libs.danmakuFlameMaster)
 
@@ -270,7 +293,7 @@ dependencies {
 
     //网络
     implementation(libs.okhttp)
-    implementation(libs.okhttpBrotli)
+    implementation(libs.brotli.dec)
     implementation(fileTree(dir: 'cronetlib', include: ['*.jar', '*.aar']))
 
     implementation(libs.protobuf.javalite)
@@ -288,6 +311,17 @@ dependencies {
     //webServer
     implementation(libs.nanohttpd.nanohttpd)
     implementation(libs.nanohttpd.websocket)
+
+    //MCP server (Streamable HTTP)
+    implementation(libs.mcp.sdk.server) {
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-reflect'
+    }
+    implementation(libs.ktor.server.cio) {
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-reflect'
+    }
+    testImplementation(libs.ktor.server.test.host) {
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-reflect'
+    }
 
     //二维码
     //noinspection GradleDependency

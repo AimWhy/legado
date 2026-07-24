@@ -10,7 +10,6 @@ import androidx.activity.viewModels
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.widget.PopupMenu
 import androidx.appcompat.widget.SearchView
-import androidx.core.os.bundleOf
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
@@ -41,6 +40,7 @@ import io.legado.app.ui.book.search.SearchActivity
 import io.legado.app.ui.book.search.SearchScope
 import io.legado.app.ui.book.source.debug.BookSourceDebugActivity
 import io.legado.app.ui.book.source.edit.BookSourceEditActivity
+import io.legado.app.ui.book.source.edit.JsSourceEditActivity
 import io.legado.app.ui.config.CheckSourceConfig
 import io.legado.app.ui.file.HandleFileContract
 import io.legado.app.ui.qrcode.QrCodeResult
@@ -181,11 +181,12 @@ class BookSourceActivity : VMBaseActivity<ActivityBookSourceBinding, BookSourceV
     override fun onCompatOptionsItemSelected(item: MenuItem): Boolean {
         when (item.itemId) {
             R.id.menu_add_book_source -> startActivity<BookSourceEditActivity>()
+            R.id.menu_add_js_source -> startActivity<JsSourceEditActivity>()
             R.id.menu_import_qr -> qrResult.launch()
             R.id.menu_group_manage -> showDialogFragment<GroupManageDialog>()
             R.id.menu_import_local -> importDoc.launch {
                 mode = HandleFileContract.FILE
-                allowExtensions = arrayOf("txt", "json")
+                allowExtensions = arrayOf("txt", "json", "js")
             }
 
             R.id.menu_import_onLine -> showImportDialog()
@@ -492,10 +493,11 @@ class BookSourceActivity : VMBaseActivity<ActivityBookSourceBinding, BookSourceV
             ) { file, name ->
                 exportDir.launch {
                     mode = HandleFileContract.EXPORT
+                    val isJs = file.name.endsWith(".js")
                     fileData = HandleFileContract.FileData(
                         name,
                         file,
-                        "application/json"
+                        if (isJs) "text/javascript" else "application/json"
                     )
                 }
             }
@@ -505,8 +507,8 @@ class BookSourceActivity : VMBaseActivity<ActivityBookSourceBinding, BookSourceV
                 searchView.query?.toString(),
                 sortAscending,
                 sort
-            ) { file, name ->
-                share(file)
+            ) { file, _ ->
+                share(file, if (file.name.endsWith(".js")) "text/javascript" else "text/*")
             }
 
             R.id.menu_check_selected_interval -> adapter.checkSelectedInterval()
@@ -530,11 +532,15 @@ class BookSourceActivity : VMBaseActivity<ActivityBookSourceBinding, BookSourceV
                     }
                 }
                 val selectItems = adapter.selection
-                CheckSource.start(this@BookSourceActivity, selectItems)
                 val adapterItems = adapter.getItems()
                 val firstItem = adapterItems.indexOf(selectItems.firstOrNull())
                 val lastItem = adapterItems.indexOf(selectItems.lastOrNull())
-                Debug.isChecking = firstItem >= 0 && lastItem >= 0
+                if (firstItem >= 0 && lastItem >= 0 && !Debug.tryStartChecking()) {
+                    keepScreenOn(false)
+                    toastOnUi("书源调试通道占用中，请稍后重试")
+                    return@okButton
+                }
+                CheckSource.start(this@BookSourceActivity, selectItems)
                 startCheckMessageRefreshJob(firstItem, lastItem)
             }
             neutralButton(R.string.check_source_config)
@@ -640,7 +646,6 @@ class BookSourceActivity : VMBaseActivity<ActivityBookSourceBinding, BookSourceV
                     .make(binding.root, msg, Snackbar.LENGTH_INDEFINITE)
                     .setAction(R.string.cancel) {
                         CheckSource.stop(this)
-                        Debug.finishChecking()
                     }.apply { show() }
             }
         }
@@ -651,7 +656,9 @@ class BookSourceActivity : VMBaseActivity<ActivityBookSourceBinding, BookSourceV
             adapter.notifyItemRangeChanged(
                 0,
                 adapter.itemCount,
-                bundleOf(Pair("checkSourceMessage", null))
+                Bundle().apply {
+                    putString("checkSourceMessage", null)
+                }
             )
             groups.forEach { group ->
                 if (group.contains("失效") && searchView.query.isEmpty()) {
@@ -671,13 +678,17 @@ class BookSourceActivity : VMBaseActivity<ActivityBookSourceBinding, BookSourceV
                         adapter.notifyItemRangeChanged(
                             0,
                             adapter.itemCount,
-                            bundleOf(Pair("checkSourceMessage", null))
+                            Bundle().apply {
+                                putString("checkSourceMessage", null)
+                            }
                         )
                     } else {
                         adapter.notifyItemRangeChanged(
                             firstItem,
                             lastItem + 1,
-                            bundleOf(Pair("checkSourceMessage", null))
+                            Bundle().apply {
+                                putString("checkSourceMessage", null)
+                            }
                         )
                     }
                     if (!Debug.isChecking) {

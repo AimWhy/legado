@@ -66,10 +66,15 @@ class BookshelfReadProgressTest {
     }
 
     @Test
-    fun `bookshelf settings expose the progress switch in order`() {
+    fun `bookshelf settings expose display switches in order`() {
         val document = parseProjectXml("src/main/res/layout/dialog_bookshelf_config.xml")
         val progressSwitch = document.findElementById("@+id/sw_show_read_progress")
         val waitSwitch = document.findElementById("@+id/sw_show_wait_up_books")
+        val fastScrollerSwitch =
+            document.findElementById("@+id/sw_show_bookshelf_fast_scroller")
+        val recentReadingSwitch = document.findElementById("@+id/sw_show_recent_reading")
+        val statsSwitch = document.findElementById("@+id/sw_show_bookshelf_stats")
+        val layout = document.findElementById("@+id/ll_layout")
 
         assertEquals("@string/show_read_progress", progressSwitch.androidAttribute("text"))
         assertEquals(
@@ -80,15 +85,128 @@ class BookshelfReadProgressTest {
             "@+id/sw_show_read_progress",
             waitSwitch.appAttribute("layout_constraintTop_toBottomOf"),
         )
+        assertEquals(
+            "@+id/sw_show_bookshelf_fast_scroller",
+            recentReadingSwitch.appAttribute("layout_constraintTop_toBottomOf"),
+        )
+        assertEquals("@string/recent_reading", recentReadingSwitch.androidAttribute("text"))
+        assertEquals(
+            "@+id/sw_show_recent_reading",
+            statsSwitch.appAttribute("layout_constraintTop_toBottomOf"),
+        )
+        assertEquals("@string/bookshelf_statistics", statsSwitch.androidAttribute("text"))
+        assertEquals(
+            "@+id/sw_show_bookshelf_stats",
+            layout.appAttribute("layout_constraintTop_toBottomOf"),
+        )
+        assertEquals(
+            "@+id/sw_show_wait_up_books",
+            fastScrollerSwitch.appAttribute("layout_constraintTop_toBottomOf"),
+        )
+    }
+
+    @Test
+    fun `bookshelf layouts expose the shared header and keep content below it`() {
+        val header = parseProjectXml("src/main/res/layout/view_bookshelf_header.xml")
+        assertEquals("gone", header.documentElement.androidAttribute("visibility"))
+        assertEquals(
+            "gone",
+            header.findElementById("@+id/continue_reading").androidAttribute("visibility"),
+        )
+        listOf("tv_shelf_stats", "tv_continue_name", "tv_continue_chapter", "tv_continue_percent")
+            .forEach { id -> header.findElementById("@+id/$id") }
+        listOf("tv_continue_name", "tv_continue_chapter").forEach { id ->
+            val text = header.findElementById("@+id/$id")
+            assertEquals("0dp", text.androidAttribute("layout_width"))
+            assertEquals("1", text.androidAttribute("layout_weight"))
+        }
+
+        val style1 = parseProjectXml("src/main/res/layout/fragment_bookshelf1.xml")
+        assertEquals(
+            "@layout/view_bookshelf_header",
+            style1.findElementById("@+id/shelf_header").getAttribute("layout"),
+        )
+        val viewPager = style1.findElementById("@+id/view_pager_bookshelf")
+        assertEquals("0dp", viewPager.androidAttribute("layout_height"))
+        assertEquals("1", viewPager.androidAttribute("layout_weight"))
+
+        val style2 = parseProjectXml("src/main/res/layout/fragment_bookshelf2.xml")
+        assertEquals(
+            "@+id/shelf_header",
+            style2.findElementById("@+id/refresh_layout")
+                .appAttribute("layout_constraintTop_toBottomOf"),
+        )
+        assertEquals(
+            "@+id/shelf_header",
+            style2.findElementById("@+id/tv_empty_msg")
+                .appAttribute("layout_constraintTop_toBottomOf"),
+        )
+    }
+
+    @Test
+    fun `bookshelf header options default off and gate database work`() {
+        val appConfig =
+            projectFile("src/main/java/io/legado/app/help/config/AppConfig.kt").readText()
+        assertTrue(
+            appConfig.contains(
+                "get() = appCtx.getPrefBoolean(PreferKey.showBookshelfRecentReading, false)",
+            ),
+        )
+        assertTrue(
+            appConfig.contains(
+                "get() = appCtx.getPrefBoolean(PreferKey.showBookshelfStats, false)",
+            ),
+        )
+
+        val fragment = projectFile(
+            "src/main/java/io/legado/app/ui/main/bookshelf/BaseBookshelfFragment.kt",
+        ).readText()
+        val disabledGate = fragment.indexOf("if (!showRecentReading && !showBookshelfStats) return")
+        val databaseFlow = fragment.indexOf("appDb.bookDao.flowShelfBookCount()")
+        assertTrue(disabledGate >= 0)
+        assertTrue(databaseFlow > disabledGate)
+        assertTrue(fragment.contains("val book = if (showRecentReading)"))
+        assertTrue(fragment.contains("val readingCount = if (showBookshelfStats)"))
+        assertTrue(
+            fragment.contains(
+                "if (showBookshelfStats || book != null) View.VISIBLE else View.GONE",
+            ),
+        )
+        val recentSetting = fragment.indexOf(
+            "AppConfig.showBookshelfRecentReading = swShowRecentReading.isChecked",
+        )
+        val statsSetting = fragment.indexOf(
+            "AppConfig.showBookshelfStats = swShowBookshelfStats.isChecked",
+        )
+        assertTrue(recentSetting >= 0)
+        assertTrue(fragment.indexOf("recreate = true", recentSetting) in 0..<statsSetting)
+        assertTrue(statsSetting >= 0)
+        assertTrue(fragment.indexOf("recreate = true", statsSetting) > statsSetting)
+    }
+
+    @Test
+    fun `continue reading query includes every shelf media type`() {
+        val source = projectFile("src/main/java/io/legado/app/data/dao/BookDao.kt").readText()
+        val propertyIndex = source.indexOf("val lastReadBookOnShelf")
+        val queryStart = source.lastIndexOf("@get:Query(", propertyIndex)
+        val query = source.substring(queryStart, propertyIndex)
+
+        assertTrue(query.contains("type & \${BookType.notShelf} = 0"))
+        assertFalse(query.replace("BookType.notShelf", "").contains("BookType."))
+        assertTrue(query.contains("durChapterIndex > 0 OR durChapterPos > 0"))
+        assertTrue(query.contains("durChapterTime DESC limit 1"))
     }
 
     private fun parseProjectXml(pathInApp: String): Document {
-        val file = listOf(File(pathInApp), File("app/$pathInApp"))
-            .firstOrNull { it.isFile }
-            ?: error("Missing project file: $pathInApp")
         return DocumentBuilderFactory.newInstance().apply {
             isNamespaceAware = true
-        }.newDocumentBuilder().parse(file)
+        }.newDocumentBuilder().parse(projectFile(pathInApp))
+    }
+
+    private fun projectFile(pathInApp: String): File {
+        return listOf(File(pathInApp), File("app/$pathInApp"))
+            .firstOrNull { it.isFile }
+            ?: error("Missing project file: $pathInApp")
     }
 
     private fun Document.findElementById(id: String): Element =

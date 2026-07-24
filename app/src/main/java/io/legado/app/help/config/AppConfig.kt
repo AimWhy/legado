@@ -1,5 +1,6 @@
 package io.legado.app.help.config
 
+import android.content.Context.MODE_PRIVATE
 import android.content.SharedPreferences
 import android.os.Build
 import io.legado.app.BuildConfig
@@ -27,6 +28,9 @@ import java.net.InetAddress
 
 @Suppress("MemberVisibilityCanBePrivate", "ConstPropertyName")
 object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
+    private const val JS_SOURCE_API_PREFS = "js_source_api_credentials"
+    private const val JS_SOURCE_API_TOKEN = "token"
+
     val isCronet = appCtx.getPrefBoolean(PreferKey.cronet)
     var useAntiAlias = appCtx.getPrefBoolean(PreferKey.antiAlias)
     var userAgent: String = getPrefUserAgent()
@@ -207,6 +211,18 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
             appCtx.putPrefBoolean(PreferKey.showBookshelfReadProgress, value)
         }
 
+    var showBookshelfRecentReading: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.showBookshelfRecentReading, false)
+        set(value) {
+            appCtx.putPrefBoolean(PreferKey.showBookshelfRecentReading, value)
+        }
+
+    var showBookshelfStats: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.showBookshelfStats, false)
+        set(value) {
+            appCtx.putPrefBoolean(PreferKey.showBookshelfStats, value)
+        }
+
     var showWaitUpCount: Boolean
         get() = appCtx.getPrefBoolean(PreferKey.showWaitUpCount, false)
         set(value) {
@@ -361,6 +377,12 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
             appCtx.putPrefInt(PreferKey.ttsTimer, value)
         }
 
+    var sleepTimerPreferChapter: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.sleepTimerPreferChapter, false)
+        set(value) {
+            appCtx.putPrefBoolean(PreferKey.sleepTimerPreferChapter, value)
+        }
+
     val speechRatePlay: Int get() = if (ttsFlowSys) defaultSpeechRate else ttsSpeechRate
 
     var chineseConverterType: Int
@@ -459,6 +481,29 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         get() = appCtx.getPrefInt(PreferKey.webPort, 1122)
         set(value) {
             appCtx.putPrefInt(PreferKey.webPort, value)
+        }
+
+    var mcpPort: Int
+        get() = appCtx.getPrefInt(PreferKey.mcpPort, 1236)
+        set(value) {
+            appCtx.putPrefInt(PreferKey.mcpPort, value)
+        }
+
+    var jsSourceApiToken: String?
+        get() = appCtx.getSharedPreferences(JS_SOURCE_API_PREFS, MODE_PRIVATE)
+            .getString(JS_SOURCE_API_TOKEN, null)
+        set(value) {
+            val normalizedValue = normalizeJsSourceApiToken(value)
+            appCtx.getSharedPreferences(JS_SOURCE_API_PREFS, MODE_PRIVATE)
+                .edit()
+                .apply {
+                    if (normalizedValue == null) {
+                        remove(JS_SOURCE_API_TOKEN)
+                    } else {
+                        putString(JS_SOURCE_API_TOKEN, normalizedValue)
+                    }
+                }
+                .apply()
         }
 
     var tocUiUseReplace: Boolean
@@ -585,6 +630,16 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
     val updateToVariant get() = appCtx.getPrefString(PreferKey.updateToVariant, "default_version")
 
     val streamReadAloudAudio get() = appCtx.getPrefBoolean(PreferKey.streamReadAloudAudio, false)
+
+    var audioCacheTreeUri: String?
+        get() = appCtx.getPrefString(PreferKey.audioCacheTreeUri)
+        set(value) {
+            if (value.isNullOrBlank()) {
+                appCtx.removePref(PreferKey.audioCacheTreeUri)
+            } else {
+                appCtx.putPrefString(PreferKey.audioCacheTreeUri, value)
+            }
+        }
 
     val doublePageHorizontal: String?
         get() = appCtx.getPrefString(PreferKey.doublePageHorizontal)
@@ -834,5 +889,9 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         }
 
     val autoUpdateVariant get() = appCtx.getPrefBoolean("autoUpdateVariant", true)
+}
+
+internal fun normalizeJsSourceApiToken(value: String?): String? {
+    return value?.trim()?.takeIf { it.isNotEmpty() }
 }
 

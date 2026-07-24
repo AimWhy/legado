@@ -23,12 +23,41 @@ class RssSourceDebugWebSocket(handshakeRequest: NanoHTTPD.IHTTPSession) :
 
     private val notPrintState = arrayOf(10, 20, 30, 40)
 
+    @Volatile
+    private var requestReceived = false
+
     override fun onOpen() {
         launch(IO) {
+            delay(AUTH_TIMEOUT_MILLIS)
+            if (!requestReceived && isOpen) {
+                close(
+                    NanoWSD.WebSocketFrame.CloseCode.PolicyViolation,
+                    "认证超时",
+                    false
+                )
+            }
+        }
+    }
+
+    private fun startHeartbeat() {
+        launch(IO) {
             kotlin.runCatching {
-                while (isOpen) {
-                    ping("ping".toByteArray())
-                    delay(30000)
+                while (requestReceived && isOpen) {
+                    delay(30_000)
+                    if (isOpen) {
+                        ping("ping".toByteArray())
+                    }
+                }
+            }.onFailure {
+                cancelOwnedDebug()
+                if (it is CancellationException) throw it
+                it.printOnDebug()
+                runCatching {
+                    close(
+                        NanoWSD.WebSocketFrame.CloseCode.InternalServerError,
+                        "调试连接异常",
+                        false
+                    )
                 }
             }
         }
@@ -40,15 +69,19 @@ class RssSourceDebugWebSocket(handshakeRequest: NanoHTTPD.IHTTPSession) :
         initiatedByRemote: Boolean
     ) {
         cancel()
-        Debug.cancelDebug(true)
+        cancelOwnedDebug()
     }
 
     override fun onMessage(message: NanoWSD.WebSocketFrame) {
         launch(IO) {
             kotlin.runCatching {
+                if (requestReceived) return@launch
                 if (!message.textPayload.isJson()) {
-                    send("数据必须为Json格式")
-                    close(NanoWSD.WebSocketFrame.CloseCode.NormalClosure, "调试结束", false)
+                    close(
+                        NanoWSD.WebSocketFrame.CloseCode.PolicyViolation,
+                        "认证数据格式错误",
+                        false
+                    )
                     return@launch
                 }
                 val debugBean =
@@ -60,10 +93,41 @@ class RssSourceDebugWebSocket(handshakeRequest: NanoHTTPD.IHTTPSession) :
                         close(NanoWSD.WebSocketFrame.CloseCode.NormalClosure, "调试结束", false)
                         return@launch
                     }
-                    appDb.rssSourceDao.getByKey(tag)?.let {
-                        Debug.callback = this@RssSourceDebugWebSocket
-                        Debug.startDebug(this, it)
+                    val source = appDb.rssSourceDao.getByKey(tag)
+                    if (source == null) {
+                        send("订阅源不存在")
+                        close(NanoWSD.WebSocketFrame.CloseCode.NormalClosure, "调试结束", false)
+                        return@launch
                     }
+                    if (!Debug.tryAcquireCallback(this@RssSourceDebugWebSocket)) {
+                        send("调试通道占用中，请稍后重试")
+                        close(
+                            NanoWSD.WebSocketFrame.CloseCode.NormalClosure,
+                            "调试结束",
+                            false
+                        )
+                        return@launch
+                    }
+                    requestReceived = true
+                    startHeartbeat()
+                    Debug.startDebug(this, source)
+                } else {
+                    close(
+                        NanoWSD.WebSocketFrame.CloseCode.PolicyViolation,
+                        "认证数据格式错误",
+                        false
+                    )
+                }
+            }.onFailure {
+                if (it is CancellationException) throw it
+                cancelOwnedDebug()
+                it.printOnDebug()
+                runCatching {
+                    close(
+                        NanoWSD.WebSocketFrame.CloseCode.InternalServerError,
+                        "调试失败",
+                        false
+                    )
                 }
             }
         }
@@ -74,7 +138,7 @@ class RssSourceDebugWebSocket(handshakeRequest: NanoHTTPD.IHTTPSession) :
     }
 
     override fun onException(exception: IOException) {
-        Debug.cancelDebug(true)
+        cancelOwnedDebug()
     }
 
     override fun printLog(state: Int, msg: String) {
@@ -85,13 +149,30 @@ class RssSourceDebugWebSocket(handshakeRequest: NanoHTTPD.IHTTPSession) :
             runCatching {
                 send(msg)
                 if (state == -1 || state == 1000) {
-                    Debug.cancelDebug(true)
+                    cancelOwnedDebug()
                     close(NanoWSD.WebSocketFrame.CloseCode.NormalClosure, "调试结束", false)
                 }
             }.onFailure {
+                cancelOwnedDebug()
+                if (it is CancellationException) throw it
                 it.printOnDebug()
+                runCatching {
+                    close(
+                        NanoWSD.WebSocketFrame.CloseCode.InternalServerError,
+                        "调试连接异常",
+                        false
+                    )
+                }
             }
         }
+    }
+
+    private fun cancelOwnedDebug() {
+        Debug.cancelDebug(this)
+    }
+
+    companion object {
+        private const val AUTH_TIMEOUT_MILLIS = 10_000L
     }
 
 }

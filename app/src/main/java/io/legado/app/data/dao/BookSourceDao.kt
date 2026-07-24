@@ -17,6 +17,10 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 
+private const val BOOK_SOURCE_NO_GROUP_FILTER = """
+trim(coalesce(bookSourceGroup, ''), $GROUP_TRIM_CHARACTERS) in ('', '未分组')
+"""
+
 @Dao
 interface BookSourceDao {
 
@@ -57,24 +61,20 @@ interface BookSourceDao {
     fun flowSearchEnabled(searchKey: String): Flow<List<BookSourcePart>>
 
     @Query(
-        """select * from book_sources_part 
-        where bookSourceGroup = :searchKey
-        or bookSourceGroup like :searchKey || ',%' 
-        or bookSourceGroup like  '%,' || :searchKey
-        or bookSourceGroup like  '%,' || :searchKey || ',%' 
-        order by customOrder asc"""
+        """select t2.* from book_sources_part as t2
+        where """ + NON_EMPTY_SOURCE_GROUP_CONDITION + """
+        """ + SOURCE_GROUP_MEMBERSHIP_FILTER + """
+        order by t2.customOrder asc"""
     )
-    fun flowGroupSearch(searchKey: String): Flow<List<BookSourcePart>>
+    fun flowGroupSearch(sourceGroup: String): Flow<List<BookSourcePart>>
 
     @Query(
-        """select * from book_sources 
-        where bookSourceGroup = :searchKey
-        or bookSourceGroup like :searchKey || ',%' 
-        or bookSourceGroup like  '%,' || :searchKey
-        or bookSourceGroup like  '%,' || :searchKey || ',%' 
-        order by customOrder asc"""
+        """select t2.* from book_sources as t2
+        where """ + NON_EMPTY_SOURCE_GROUP_CONDITION + """
+        """ + SOURCE_GROUP_MEMBERSHIP_FILTER + """
+        order by t2.customOrder asc"""
     )
-    fun groupSearch(searchKey: String): List<BookSource>
+    fun groupSearch(sourceGroup: String): List<BookSource>
 
     @Query("select * from book_sources_part where enabled = 1 order by customOrder asc")
     fun flowEnabled(): Flow<List<BookSourcePart>>
@@ -93,7 +93,7 @@ interface BookSourceDao {
 
     @Query(
         """select * from book_sources_part 
-        where bookSourceGroup is null or bookSourceGroup = '' or bookSourceGroup like '%未分组%'
+        where """ + BOOK_SOURCE_NO_GROUP_FILTER + """
         order by customOrder asc"""
     )
     fun flowNoGroup(): Flow<List<BookSourcePart>>
@@ -115,16 +115,14 @@ interface BookSourceDao {
     fun flowExplore(key: String): Flow<List<BookSourcePart>>
 
     @Query(
-        """select * from book_sources_part 
-        where enabledExplore = 1 
-        and hasExploreUrl = 1 
-        and (bookSourceGroup = :key
-            or bookSourceGroup like :key || ',%' 
-            or bookSourceGroup like  '%,' || :key
-            or bookSourceGroup like  '%,' || :key || ',%') 
-        order by customOrder asc"""
+        """select t2.* from book_sources_part as t2
+        where t2.enabledExplore = 1
+        and t2.hasExploreUrl = 1
+        and """ + NON_EMPTY_SOURCE_GROUP_CONDITION + """
+        """ + SOURCE_GROUP_MEMBERSHIP_FILTER + """
+        order by t2.customOrder asc"""
     )
-    fun flowGroupExplore(key: String): Flow<List<BookSourcePart>>
+    fun flowGroupExplore(sourceGroup: String): Flow<List<BookSourcePart>>
 
     @Query("select distinct bookSourceGroup from book_sources where trim(bookSourceGroup) <> ''")
     fun flowGroupsUnProcessed(): Flow<List<String>>
@@ -162,15 +160,12 @@ interface BookSourceDao {
     fun getEnabledByGroup(group: String): List<BookSource>
 
     @Query(
-        """select * from book_sources_part 
-        where enabled = 1 
-        and (bookSourceGroup = :group
-            or bookSourceGroup like :group || ',%' 
-            or bookSourceGroup like  '%,' || :group
-            or bookSourceGroup like  '%,' || :group || ',%')
-        order by customOrder asc"""
+        """select t2.* from book_sources_part as t2
+        where t2.enabled = 1
+        """ + SOURCE_GROUP_MEMBERSHIP_FILTER + """
+        order by t2.customOrder asc"""
     )
-    fun getEnabledPartByGroup(group: String): List<BookSourcePart>
+    fun getEnabledPartByGroup(sourceGroup: String): List<BookSourcePart>
 
     @Query(
         """select * from book_sources 
@@ -211,7 +206,7 @@ interface BookSourceDao {
 
     @get:Query(
         """select * from book_sources 
-        where bookSourceGroup is null or bookSourceGroup = '' or bookSourceGroup like '%未分组%'"""
+        where """ + BOOK_SOURCE_NO_GROUP_FILTER
     )
     val allNoGroup: List<BookSource>
 
@@ -246,6 +241,9 @@ interface BookSourceDao {
     @Query("select * from book_sources where bookSourceUrl = :key")
     fun getBookSource(key: String): BookSource?
 
+    @Query("select * from book_sources where bookSourceUrl in (:keys)")
+    fun getBookSources(keys: List<String>): List<BookSource>
+
     @Query("select * from book_sources_part where bookSourceUrl = :key")
     fun getBookSourcePart(key: String): BookSourcePart?
 
@@ -254,6 +252,13 @@ interface BookSourceDao {
 
     @Query("SELECT EXISTS(select 1 from book_sources where bookSourceUrl = :key)")
     fun has(key: String): Boolean
+
+    @Query("select mainJs from book_sources where bookSourceUrl = :key")
+    fun getMainJs(key: String): String?
+
+    fun hasJsSource(key: String): Boolean {
+        return !getMainJs(key).isNullOrBlank()
+    }
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     fun insert(vararg bookSource: BookSource)

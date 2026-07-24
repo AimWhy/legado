@@ -18,7 +18,6 @@ import android.view.View
 import androidx.activity.addCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
-import androidx.appcompat.widget.PopupMenu
 import androidx.core.view.get
 import androidx.core.view.isGone
 import androidx.core.view.isVisible
@@ -34,10 +33,12 @@ import io.legado.app.constant.EventBus
 import io.legado.app.constant.PreferKey
 import io.legado.app.constant.Status
 import io.legado.app.data.appDb
+import io.legado.app.data.entities.BaseSource
 import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookChapter
 import io.legado.app.data.entities.BookProgress
 import io.legado.app.data.entities.BookSource
+import io.legado.app.data.entities.rule.ReviewRule
 import io.legado.app.exception.NoStackTraceException
 import io.legado.app.help.AppWebDav
 import io.legado.app.help.IntentData
@@ -68,6 +69,9 @@ import io.legado.app.model.ReadBook
 import io.legado.app.model.analyzeRule.AnalyzeRule
 import io.legado.app.model.analyzeRule.AnalyzeRule.Companion.setChapter
 import io.legado.app.model.analyzeRule.AnalyzeRule.Companion.setCoroutineContext
+import io.legado.app.model.analyzeRule.AnalyzeUrl
+import io.legado.app.model.analyzeRule.ReviewRuleParser
+import io.legado.app.model.jsSource.JsSourceReview
 import io.legado.app.utils.GSON
 import io.legado.app.utils.fromJsonObject
 import io.legado.app.utils.isJsonObject
@@ -83,6 +87,7 @@ import io.legado.app.ui.book.changesource.ChangeChapterSourceDialog
 import io.legado.app.ui.book.info.BookInfoActivity
 import io.legado.app.ui.book.read.config.AutoReadDialog
 import io.legado.app.ui.book.read.config.BgTextConfigDialog.Companion.BG_COLOR
+import io.legado.app.ui.book.read.config.BgTextConfigDialog.Companion.REVIEW_ICON_COLOR
 import io.legado.app.ui.book.read.config.BgTextConfigDialog.Companion.TEXT_ACCENT_COLOR
 import io.legado.app.ui.book.read.config.BgTextConfigDialog.Companion.TEXT_COLOR
 import io.legado.app.ui.book.read.config.MoreConfigDialog
@@ -112,13 +117,13 @@ import io.legado.app.ui.replace.ReplaceRuleActivity
 import io.legado.app.ui.replace.edit.ReplaceEditActivity
 import io.legado.app.ui.widget.PopupAction
 import io.legado.app.ui.widget.dialog.PhotoDialog
+import io.legado.app.ui.widget.popupActionMenu
 import io.legado.app.utils.ACache
 import io.legado.app.utils.ColorUtils
 import io.legado.app.utils.Debounce
 import io.legado.app.utils.LogUtils
 import io.legado.app.utils.NetworkUtils
 import io.legado.app.utils.StartActivityContract
-import io.legado.app.utils.applyOpenTint
 import io.legado.app.utils.buildMainHandler
 import io.legado.app.utils.dismissDialogFragment
 import io.legado.app.utils.dpToPx
@@ -163,7 +168,6 @@ class ReadBookActivity : BaseReadBookActivity(),
     ReadView.CallBack,
     TextActionMenu.CallBack,
     ContentTextView.CallBack,
-    PopupMenu.OnMenuItemClickListener,
     ReadMenu.CallBack,
     SearchMenu.CallBack,
     ReadAloudDialog.CallBack,
@@ -185,6 +189,8 @@ class ReadBookActivity : BaseReadBookActivity(),
         registerForActivityResult(StartActivityContract(BookSourceEditActivity::class.java)) {
             if (it.resultCode == RESULT_OK) {
                 viewModel.upBookSource {
+                    resetReviewSummaryState()
+                    ReadBook.loadContent(resetPageOffset = false)
                     upMenuView()
                 }
             }
@@ -270,6 +276,16 @@ class ReadBookActivity : BaseReadBookActivity(),
             binding.readMenu.upSeekBar()
         }
     }
+    private var reviewSummaryAppliedKey: String? = null
+    private var reviewSummaryLoadingKey: String? = null
+    private var reviewSummaryRequestToken = 0L
+    private val reviewSummaryCache = object :
+        LinkedHashMap<String, ReviewRuleParser.SummaryResult>(8, 0.75f, true) {
+        override fun removeEldestEntry(
+            eldest: MutableMap.MutableEntry<String, ReviewRuleParser.SummaryResult>
+        ): Boolean = size > 5
+    }
+    private val reviewSummaryPrefetchingKeys = HashSet<String>()
 
     //恢复跳转前进度对话框的交互结果
     private var confirmRestoreProcess: Boolean? = null
@@ -325,6 +341,7 @@ class ReadBookActivity : BaseReadBookActivity(),
     override fun onPostCreate(savedInstanceState: Bundle?) {
         super.onPostCreate(savedInstanceState)
         viewModel.initReadBookConfig(intent)
+        ChapterProvider.clearReviewProviders()
         Looper.myQueue().addIdleHandler {
             viewModel.initData(intent)
             false
@@ -334,6 +351,8 @@ class ReadBookActivity : BaseReadBookActivity(),
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
+        resetReviewSummaryState()
         viewModel.initData(intent)
     }
 
@@ -415,18 +434,10 @@ class ReadBookActivity : BaseReadBookActivity(),
     override fun onCompatCreateOptionsMenu(menu: Menu): Boolean {
         menuInflater.inflate(R.menu.book_read, menu)
         menu.iconItemOnLongClick(R.id.menu_change_source) {
-            PopupMenu(this, it).apply {
-                inflate(R.menu.book_read_change_source)
-                this.menu.applyOpenTint(this@ReadBookActivity)
-                setOnMenuItemClickListener(this@ReadBookActivity)
-            }.show()
+            showChangeSourceMenu(it)
         }
         menu.iconItemOnLongClick(R.id.menu_refresh) {
-            PopupMenu(this, it).apply {
-                inflate(R.menu.book_read_refresh)
-                this.menu.applyOpenTint(this@ReadBookActivity)
-                setOnMenuItemClickListener(this@ReadBookActivity)
-            }.show()
+            showRefreshMenu(it)
         }
         binding.readMenu.refreshMenuColorFilter()
         return super.onCompatCreateOptionsMenu(menu)
@@ -481,64 +492,96 @@ class ReadBookActivity : BaseReadBookActivity(),
         }
     }
 
+    private fun showChangeSourceMenu(anchor: View) {
+        popupActionMenu(this) {
+            item(getString(R.string.chapter_change_source), "chapter")
+            item(getString(R.string.book_change_source), "book")
+        }.show(anchor) { action ->
+            when (action) {
+                "chapter" -> showChapterChangeSource()
+                "book" -> showBookChangeSource()
+            }
+        }
+    }
+
+    private fun showRefreshMenu(anchor: View) {
+        popupActionMenu(this) {
+            item(getString(R.string.menu_refresh_dur), "dur")
+            item(getString(R.string.menu_refresh_after), "after")
+            item(getString(R.string.menu_refresh_all), "all")
+        }.show(anchor) { action ->
+            when (action) {
+                "dur" -> refreshDurChapter()
+                "after" -> refreshAfterChapters()
+                "all" -> refreshAllChapters()
+            }
+        }
+    }
+
+    private fun showBookChangeSource() {
+        binding.readMenu.runMenuOut()
+        ReadBook.book?.let {
+            showDialogFragment(ChangeBookSourceDialog(it.name, it.author))
+        }
+    }
+
+    private fun showChapterChangeSource() {
+        lifecycleScope.launch {
+            val book = ReadBook.book ?: return@launch
+            val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, ReadBook.durChapterIndex)
+                ?: return@launch
+            binding.readMenu.runMenuOut()
+            showDialogFragment(
+                ChangeChapterSourceDialog(book.name, book.author, chapter.index, chapter.title)
+            )
+        }
+    }
+
+    private fun refreshDurChapter() {
+        resetReviewSummaryState()
+        if (ReadBook.bookSource == null) {
+            upContent()
+        } else {
+            ReadBook.book?.let {
+                ReadBook.curTextChapter = null
+                binding.readView.upContent()
+                viewModel.refreshContentDur(it)
+            }
+        }
+    }
+
+    private fun refreshAfterChapters() {
+        resetReviewSummaryState()
+        if (ReadBook.bookSource == null) {
+            upContent()
+        } else {
+            ReadBook.book?.let {
+                ReadBook.clearTextChapter()
+                binding.readView.upContent()
+                viewModel.refreshContentAfter(it)
+            }
+        }
+    }
+
+    private fun refreshAllChapters() {
+        if (ReadBook.bookSource == null) {
+            resetReviewSummaryState()
+            upContent()
+        } else {
+            ReadBook.book?.let {
+                refreshContentAll(it)
+            }
+        }
+    }
+
     /**
      * 菜单
      */
     override fun onCompatOptionsItemSelected(item: MenuItem): Boolean {
         when (item.itemId) {
-            R.id.menu_change_source,
-            R.id.menu_book_change_source -> {
-                binding.readMenu.runMenuOut()
-                ReadBook.book?.let {
-                    showDialogFragment(ChangeBookSourceDialog(it.name, it.author))
-                }
-            }
+            R.id.menu_change_source -> showBookChangeSource()
 
-            R.id.menu_chapter_change_source -> lifecycleScope.launch {
-                val book = ReadBook.book ?: return@launch
-                val chapter =
-                    appDb.bookChapterDao.getChapter(book.bookUrl, ReadBook.durChapterIndex)
-                        ?: return@launch
-                binding.readMenu.runMenuOut()
-                showDialogFragment(
-                    ChangeChapterSourceDialog(book.name, book.author, chapter.index, chapter.title)
-                )
-            }
-
-            R.id.menu_refresh,
-            R.id.menu_refresh_dur -> {
-                if (ReadBook.bookSource == null) {
-                    upContent()
-                } else {
-                    ReadBook.book?.let {
-                        ReadBook.curTextChapter = null
-                        binding.readView.upContent()
-                        viewModel.refreshContentDur(it)
-                    }
-                }
-            }
-
-            R.id.menu_refresh_after -> {
-                if (ReadBook.bookSource == null) {
-                    upContent()
-                } else {
-                    ReadBook.book?.let {
-                        ReadBook.clearTextChapter()
-                        binding.readView.upContent()
-                        viewModel.refreshContentAfter(it)
-                    }
-                }
-            }
-
-            R.id.menu_refresh_all -> {
-                if (ReadBook.bookSource == null) {
-                    upContent()
-                } else {
-                    ReadBook.book?.let {
-                        refreshContentAll(it)
-                    }
-                }
-            }
+            R.id.menu_refresh -> refreshDurChapter()
 
             R.id.menu_download -> showDownloadDialog()
             R.id.menu_add_bookmark -> addBookmark()
@@ -657,13 +700,23 @@ class ReadBookActivity : BaseReadBookActivity(),
     }
 
     private fun refreshContentAll(book: Book) {
+        resetReviewSummaryState()
         ReadBook.clearTextChapter()
         binding.readView.upContent()
         viewModel.refreshContentAll(book)
     }
 
-    override fun onMenuItemClick(item: MenuItem): Boolean {
-        return onCompatOptionsItemSelected(item)
+    private fun resetReviewSummaryState() {
+        reviewSummaryRequestToken++
+        reviewSummaryAppliedKey = null
+        reviewSummaryLoadingKey = null
+        synchronized(reviewSummaryCache) {
+            reviewSummaryCache.clear()
+        }
+        synchronized(reviewSummaryPrefetchingKeys) {
+            reviewSummaryPrefetchingKeys.clear()
+        }
+        ChapterProvider.clearReviewProviders()
     }
 
     /**
@@ -1034,11 +1087,14 @@ class ReadBookActivity : BaseReadBookActivity(),
      * 内容加载完成
      */
     override fun contentLoadFinish() {
-        if (intent.getBooleanExtra("readAloud", false)) {
-            intent.removeExtra("readAloud")
-            ReadBook.readAloud()
+        lifecycleScope.launch(Main.immediate) {
+            if (intent.getBooleanExtra("readAloud", false)) {
+                intent.removeExtra("readAloud")
+                ReadBook.readAloud()
+            }
+            loadStates = true
+            loadReviewSummaryIfNeeded()
         }
-        loadStates = true
     }
 
     /**
@@ -1055,6 +1111,7 @@ class ReadBookActivity : BaseReadBookActivity(),
                 upSeekBarProgress()
             }
             loadStates = false
+            loadReviewSummaryIfNeeded()
             success?.invoke()
         }
     }
@@ -1069,6 +1126,7 @@ class ReadBookActivity : BaseReadBookActivity(),
             upSeekBarProgress()
         }
         loadStates = false
+        loadReviewSummaryIfNeeded()
     }
 
     override fun upPageAnim(upRecorder: Boolean) {
@@ -1172,6 +1230,7 @@ class ReadBookActivity : BaseReadBookActivity(),
         get() = ReadBook.book
 
     override fun changeTo(source: BookSource, book: Book, toc: List<BookChapter>) {
+        resetReviewSummaryState()
         if (!book.isAudio) {
             viewModel.changeTo(book, toc)
         } else {
@@ -1289,6 +1348,7 @@ class ReadBookActivity : BaseReadBookActivity(),
      * 禁用书源
      */
     override fun disableSource() {
+        resetReviewSummaryState()
         viewModel.disableSource()
     }
 
@@ -1483,6 +1543,344 @@ class ReadBookActivity : BaseReadBookActivity(),
         }
     }
 
+    override fun onReviewClick(paragraphNum: Int, count: Int, chapterIndex: Int) {
+        if (paragraphNum != -1 && paragraphNum <= 0) return
+        if (count <= 0) {
+            toastOnUi(R.string.review_empty)
+            return
+        }
+        val source = ReadBook.bookSource ?: return
+        if (source.isJsSource()) {
+            val book = ReadBook.book ?: return
+            showDialogFragment(
+                ReviewDetailDialog(
+                    paragraphNum = paragraphNum,
+                    totalCount = count,
+                    chapterIndex = chapterIndex,
+                    paragraphData = ChapterProvider.getReviewKeyById(paragraphNum, chapterIndex),
+                    bookUrl = book.bookUrl,
+                    sourceKey = source.getKey(),
+                    ruleHash = source.mainJs.hashCode(),
+                )
+            )
+            return
+        }
+        val rule = source.ruleReview ?: run {
+            toastOnUi(R.string.review_rule_missing)
+            return
+        }
+        if (!rule.enabled) {
+            toastOnUi(R.string.review_rule_missing)
+            return
+        }
+        if (rule.reviewDetailUrl.isNullOrBlank()) {
+            toastOnUi(R.string.review_detail_url_missing)
+            return
+        }
+        if (rule.detailListRule.isNullOrBlank() || rule.detailContentRule.isNullOrBlank()) {
+            toastOnUi(R.string.review_detail_rule_missing)
+            return
+        }
+        val book = ReadBook.book ?: return
+        showDialogFragment(
+            ReviewDetailDialog(
+                paragraphNum = paragraphNum,
+                totalCount = count,
+                chapterIndex = chapterIndex,
+                paragraphData = ChapterProvider.getReviewKeyById(paragraphNum, chapterIndex),
+                bookUrl = book.bookUrl,
+                sourceKey = source.getKey(),
+                ruleHash = rule.hashCode()
+            )
+        )
+    }
+
+    private fun loadReviewSummaryIfNeeded() {
+        val source = ReadBook.bookSource ?: run {
+            clearReviewSummaryProviders()
+            return
+        }
+        val book = ReadBook.book ?: run {
+            clearReviewSummaryProviders()
+            return
+        }
+        val chapterIndex = ReadBook.durChapterIndex
+        val textChapter = ReadBook.curTextChapter
+        if (textChapter != null &&
+            textChapter.chapter.index == chapterIndex &&
+            !textChapter.hasBodyContent
+        ) {
+            clearReviewSummaryProviders()
+            return
+        }
+
+        if (source.isJsSource()) {
+            loadJsReviewSummaryIfNeeded(book, source, chapterIndex)
+            return
+        }
+        val rule = source.ruleReview ?: run {
+            clearReviewSummaryProviders()
+            return
+        }
+        val summaryUrl = rule.reviewSummaryUrl?.takeIf { it.isNotBlank() }
+        if (!rule.enabled ||
+            summaryUrl == null ||
+            rule.summaryListRule.isNullOrBlank() ||
+            rule.summaryParagraphIndexRule.isNullOrBlank() ||
+            rule.summaryCountRule.isNullOrBlank()
+        ) {
+            clearReviewSummaryProviders()
+            return
+        }
+
+        val key = buildReviewSummaryKey(book, source, rule.hashCode(), chapterIndex)
+        if (reviewSummaryAppliedKey == key || reviewSummaryLoadingKey == key) return
+        synchronized(reviewSummaryCache) { reviewSummaryCache[key] }?.let { cached ->
+            applyReviewSummary(key, chapterIndex, cached)
+            prefetchAdjacentReviewSummary(book, source, rule, chapterIndex)
+            return
+        }
+
+        reviewSummaryLoadingKey = key
+        val requestToken = ++reviewSummaryRequestToken
+        if (reviewSummaryAppliedKey != key) {
+            ChapterProvider.clearReviewProviders()
+        }
+        Coroutine.async(lifecycleScope, IO) {
+            val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, chapterIndex)
+                ?: return@async null
+            if (chapter.isVolume) return@async null
+            val analyzeUrl = AnalyzeUrl(
+                summaryUrl,
+                baseUrl = chapter.url,
+                source = source,
+                ruleData = book,
+                chapter = chapter,
+                coroutineContext = coroutineContext
+            )
+            val body = analyzeUrl.getStrResponseAwait(useWebView = false).body
+                ?: return@async null
+            ReviewRuleParser.parseSummary(
+                body,
+                rule,
+                source,
+                book,
+                chapter,
+                analyzeUrl.url,
+                coroutineContext
+            )
+        }.onSuccess(Main) { result ->
+            releaseReviewSummaryLoadingKey(key)
+            if (requestToken != reviewSummaryRequestToken) return@onSuccess
+            val currentBook = ReadBook.book ?: return@onSuccess
+            val currentSource = ReadBook.bookSource ?: return@onSuccess
+            val currentRule = currentSource.ruleReview ?: return@onSuccess
+            val currentKey = buildReviewSummaryKey(
+                currentBook,
+                currentSource,
+                currentRule.hashCode(),
+                ReadBook.durChapterIndex
+            )
+            if (currentKey != key) return@onSuccess
+            if (result == null) {
+                ChapterProvider.clearReviewProviders()
+                return@onSuccess
+            }
+            synchronized(reviewSummaryCache) {
+                reviewSummaryCache[key] = result
+            }
+            applyReviewSummary(key, chapterIndex, result)
+            prefetchAdjacentReviewSummary(book, source, rule, chapterIndex)
+        }.onError {
+            releaseReviewSummaryLoadingKey(key)
+            if (requestToken != reviewSummaryRequestToken) return@onError
+            val currentBook = ReadBook.book ?: return@onError
+            val currentSource = ReadBook.bookSource ?: return@onError
+            val currentRule = currentSource.ruleReview ?: return@onError
+            if (buildReviewSummaryKey(
+                    currentBook,
+                    currentSource,
+                    currentRule.hashCode(),
+                    ReadBook.durChapterIndex
+                ) != key
+            ) return@onError
+            ChapterProvider.clearReviewProviders()
+            AppLog.put("加载段评统计出错\n${it.localizedMessage}", it)
+        }
+    }
+
+    private fun loadJsReviewSummaryIfNeeded(
+        book: Book,
+        source: BookSource,
+        chapterIndex: Int,
+    ) {
+        val sourceHash = source.mainJs.hashCode()
+        val key = buildReviewSummaryKey(book, source, sourceHash, chapterIndex)
+        if (reviewSummaryAppliedKey == key || reviewSummaryLoadingKey == key) return
+        synchronized(reviewSummaryCache) { reviewSummaryCache[key] }?.let { cached ->
+            applyReviewSummary(key, chapterIndex, cached)
+            return
+        }
+
+        reviewSummaryLoadingKey = key
+        val requestToken = ++reviewSummaryRequestToken
+        if (reviewSummaryAppliedKey != key) {
+            ChapterProvider.clearReviewProviders()
+        }
+        Coroutine.async(lifecycleScope, IO) {
+            val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, chapterIndex)
+                ?: return@async null
+            if (chapter.isVolume) return@async null
+            JsSourceReview.getReviewSummaryAwait(source, book, chapter)
+        }.onSuccess(Main) { result ->
+            releaseReviewSummaryLoadingKey(key)
+            if (requestToken != reviewSummaryRequestToken) return@onSuccess
+            val currentBook = ReadBook.book ?: return@onSuccess
+            val currentSource = ReadBook.bookSource ?: return@onSuccess
+            if (!currentSource.isJsSource()) return@onSuccess
+            val currentKey = buildReviewSummaryKey(
+                currentBook,
+                currentSource,
+                currentSource.mainJs.hashCode(),
+                ReadBook.durChapterIndex,
+            )
+            if (currentKey != key) return@onSuccess
+            if (result == null) {
+                reviewSummaryAppliedKey = key
+                ChapterProvider.clearReviewProviders()
+                return@onSuccess
+            }
+            synchronized(reviewSummaryCache) {
+                reviewSummaryCache[key] = result
+            }
+            applyReviewSummary(key, chapterIndex, result)
+        }.onError {
+            releaseReviewSummaryLoadingKey(key)
+            if (requestToken != reviewSummaryRequestToken) return@onError
+            val currentBook = ReadBook.book ?: return@onError
+            val currentSource = ReadBook.bookSource ?: return@onError
+            if (!currentSource.isJsSource()) return@onError
+            if (buildReviewSummaryKey(
+                    currentBook,
+                    currentSource,
+                    currentSource.mainJs.hashCode(),
+                    ReadBook.durChapterIndex,
+                ) != key
+            ) return@onError
+            ChapterProvider.clearReviewProviders()
+            AppLog.put("加载 JavaScript 段评统计出错\n${it.localizedMessage}", it)
+        }
+    }
+
+    private fun clearReviewSummaryProviders() {
+        reviewSummaryRequestToken++
+        reviewSummaryAppliedKey = null
+        reviewSummaryLoadingKey = null
+        ChapterProvider.clearReviewProviders()
+    }
+
+    private fun applyReviewSummary(
+        key: String,
+        chapterIndex: Int,
+        result: ReviewRuleParser.SummaryResult
+    ) {
+        ChapterProvider.setReviewProviders(
+            countProvider = { targetChapterIndex, reviewId ->
+                if (targetChapterIndex == chapterIndex) result.counts[reviewId] ?: 0 else 0
+            },
+            keyProvider = { targetChapterIndex, reviewId ->
+                if (targetChapterIndex == chapterIndex) result.keys[reviewId] else null
+            }
+        )
+        reviewSummaryAppliedKey = key
+        binding.readView.upContent(relativePosition = 0, resetPageOffset = false)
+    }
+
+    private fun prefetchAdjacentReviewSummary(
+        book: Book,
+        source: BaseSource,
+        rule: ReviewRule,
+        chapterIndex: Int
+    ) {
+        val maxIndex = if (ReadBook.simulatedChapterSize > 0) {
+            ReadBook.simulatedChapterSize
+        } else {
+            ReadBook.chapterSize
+        }
+        if (maxIndex <= 0) return
+
+        val requestToken = reviewSummaryRequestToken
+        for (targetIndex in intArrayOf(chapterIndex - 1, chapterIndex + 1)) {
+            if (targetIndex !in 0 until maxIndex) continue
+            val loadedChapter = sequenceOf(
+                ReadBook.prevTextChapter,
+                ReadBook.curTextChapter,
+                ReadBook.nextTextChapter
+            ).filterNotNull().firstOrNull { it.chapter.index == targetIndex }
+            if (loadedChapter == null || !loadedChapter.hasBodyContent) continue
+
+            val key = buildReviewSummaryKey(book, source, rule.hashCode(), targetIndex)
+            if (reviewSummaryLoadingKey == key) continue
+            if (synchronized(reviewSummaryCache) { reviewSummaryCache.containsKey(key) }) continue
+            val shouldPrefetch = synchronized(reviewSummaryPrefetchingKeys) {
+                reviewSummaryPrefetchingKeys.add(key)
+            }
+            if (!shouldPrefetch) continue
+
+            Coroutine.async(lifecycleScope, IO) {
+                val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, targetIndex)
+                    ?: return@async null
+                if (chapter.isVolume) return@async null
+                val summaryUrl = rule.reviewSummaryUrl?.takeIf { it.isNotBlank() }
+                    ?: return@async null
+                val analyzeUrl = AnalyzeUrl(
+                    summaryUrl,
+                    baseUrl = chapter.url,
+                    source = source,
+                    ruleData = book,
+                    chapter = chapter,
+                    coroutineContext = coroutineContext
+                )
+                val body = analyzeUrl.getStrResponseAwait(useWebView = false).body
+                    ?: return@async null
+                ReviewRuleParser.parseSummary(
+                    body,
+                    rule,
+                    source,
+                    book,
+                    chapter,
+                    analyzeUrl.url,
+                    coroutineContext
+                )
+            }.onSuccess(Main) { result ->
+                synchronized(reviewSummaryPrefetchingKeys) {
+                    reviewSummaryPrefetchingKeys.remove(key)
+                }
+                if (requestToken != reviewSummaryRequestToken || result == null) return@onSuccess
+                synchronized(reviewSummaryCache) {
+                    reviewSummaryCache[key] = result
+                }
+            }.onError {
+                synchronized(reviewSummaryPrefetchingKeys) {
+                    reviewSummaryPrefetchingKeys.remove(key)
+                }
+            }
+        }
+    }
+
+    private fun buildReviewSummaryKey(
+        book: Book,
+        source: BaseSource,
+        reviewHash: Int,
+        chapterIndex: Int
+    ): String = "${source.getKey()}|${book.bookUrl}|$reviewHash#$chapterIndex"
+
+    private fun releaseReviewSummaryLoadingKey(key: String) {
+        if (reviewSummaryLoadingKey == key) {
+            reviewSummaryLoadingKey = null
+        }
+    }
+
 
     /**
      * 朗读按钮
@@ -1614,6 +2012,11 @@ class ReadBookActivity : BaseReadBookActivity(),
                 if (AppConfig.readBarStyleFollowPage) {
                     postEvent(EventBus.UPDATE_READ_ACTION_BAR, true)
                 }
+            }
+
+            REVIEW_ICON_COLOR -> {
+                ReadBookConfig.reviewIconColor = color
+                postEvent(EventBus.UP_CONFIG, arrayListOf(8, 9, 11))
             }
 
             TIP_COLOR -> {

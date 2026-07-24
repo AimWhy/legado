@@ -4,8 +4,6 @@ import android.content.Context
 import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup
-import android.widget.PopupMenu
-import androidx.core.os.bundleOf
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
 import io.legado.app.R
@@ -14,6 +12,7 @@ import io.legado.app.base.adapter.RecyclerAdapter
 import io.legado.app.data.entities.TxtTocRule
 import io.legado.app.databinding.ItemTxtTocRuleBinding
 import io.legado.app.lib.theme.backgroundColor
+import io.legado.app.ui.widget.popupActionMenu
 import io.legado.app.ui.widget.recycler.DragSelectTouchHelper
 import io.legado.app.ui.widget.recycler.ItemTouchCallback
 import io.legado.app.utils.ColorUtils
@@ -132,34 +131,39 @@ class TxtTocRuleAdapter(context: Context, private val callBack: CallBack) :
 
     private fun showMenu(view: View, position: Int) {
         val source = getItem(position) ?: return
-        val popupMenu = PopupMenu(context, view)
-        popupMenu.inflate(R.menu.txt_toc_rule_item)
-        popupMenu.setOnMenuItemClickListener { menuItem ->
-            when (menuItem.itemId) {
-                R.id.menu_top -> callBack.toTop(source)
-                R.id.menu_bottom -> callBack.toBottom(source)
-                R.id.menu_del -> {
+        popupActionMenu(context) {
+            item(context.getString(R.string.to_top), "top")
+            item(context.getString(R.string.to_bottom), "bottom")
+            item(context.getString(R.string.delete), "delete")
+            danger("delete")
+        }.show(view) { action ->
+            when (action) {
+                "top" -> callBack.toTop(source)
+                "bottom" -> callBack.toBottom(source)
+                "delete" -> {
                     callBack.del(source)
                     selected.remove(source)
                 }
             }
-            true
         }
-        popupMenu.show()
     }
 
     fun selectAll() {
         getItems().forEach {
             selected.add(it)
         }
-        notifyItemRangeChanged(0, itemCount, bundleOf(Pair("selected", null)))
+        notifyItemRangeChanged(0, itemCount, Bundle().apply {
+            putString("selected", null)
+        })
         callBack.upCountView()
     }
 
     fun clearSelection() {
         if (selected.isEmpty()) return
         selected.clear()
-        notifyItemRangeChanged(0, itemCount, bundleOf(Pair("selected", null)))
+        notifyItemRangeChanged(0, itemCount, Bundle().apply {
+            putString("selected", null)
+        })
         callBack.upCountView()
     }
 
@@ -171,7 +175,9 @@ class TxtTocRuleAdapter(context: Context, private val callBack: CallBack) :
                 selected.add(it)
             }
         }
-        notifyItemRangeChanged(0, itemCount, bundleOf(Pair("selected", null)))
+        notifyItemRangeChanged(0, itemCount, Bundle().apply {
+            putString("selected", null)
+        })
         callBack.upCountView()
     }
 
@@ -219,7 +225,9 @@ class TxtTocRuleAdapter(context: Context, private val callBack: CallBack) :
                     } else {
                         selected.remove(it)
                     }
-                    notifyItemChanged(position, bundleOf(Pair("selected", null)))
+                    notifyItemChanged(position, Bundle().apply {
+                        putString("selected", null)
+                    })
                     callBack.upCountView()
                     return true
                 }

@@ -1,11 +1,10 @@
 package io.legado.app.ui.replace
 
 import android.app.Application
-import android.text.TextUtils
 import io.legado.app.base.BaseViewModel
 import io.legado.app.data.appDb
 import io.legado.app.data.entities.ReplaceRule
-import io.legado.app.utils.splitNotBlank
+import io.legado.app.utils.renameGroupExact
 
 /**
  * 替换规则数据修改
@@ -105,31 +104,16 @@ class ReplaceRuleViewModel(application: Application) : BaseViewModel(application
 
     fun upGroup(oldGroup: String, newGroup: String?) {
         execute {
-            val sources = appDb.replaceRuleDao.getByGroup(oldGroup)
-            sources.forEach { source ->
-                source.group?.splitNotBlank(",")?.toHashSet()?.let {
-                    it.remove(oldGroup)
-                    if (!newGroup.isNullOrEmpty())
-                        it.add(newGroup)
-                    source.group = TextUtils.join(",", it)
+            val sources = appDb.replaceRuleDao.getByGroup(oldGroup).mapNotNull { source ->
+                source.group.renameGroupExact(oldGroup, newGroup)?.let { groups ->
+                    source.apply { group = groups }
                 }
             }
-            appDb.replaceRuleDao.update(*sources.toTypedArray())
-        }
-    }
-
-    fun delGroup(group: String) {
-        execute {
-            execute {
-                val sources = appDb.replaceRuleDao.getByGroup(group)
-                sources.forEach { source ->
-                    source.group?.splitNotBlank(",")?.toHashSet()?.let {
-                        it.remove(group)
-                        source.group = TextUtils.join(",", it)
-                    }
-                }
+            if (sources.isNotEmpty()) {
                 appDb.replaceRuleDao.update(*sources.toTypedArray())
             }
         }
     }
+
+    fun delGroup(group: String) = upGroup(group, null)
 }

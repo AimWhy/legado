@@ -11,15 +11,19 @@ import io.legado.app.base.BaseFragment
 import io.legado.app.constant.EventBus
 import io.legado.app.constant.PreferKey
 import io.legado.app.databinding.FragmentMyConfigBinding
+import io.legado.app.help.coroutine.Coroutine
 import io.legado.app.help.config.ThemeConfig
 import io.legado.app.lib.dialogs.selector
 import io.legado.app.lib.prefs.NameListPreference
 import io.legado.app.lib.prefs.SwitchPreference
 import io.legado.app.lib.prefs.fragment.PreferenceFragment
 import io.legado.app.lib.theme.primaryColor
+import io.legado.app.service.McpService
+import io.legado.app.service.AutoTaskScheduler
 import io.legado.app.service.WebService
 import io.legado.app.ui.about.AboutActivity
 import io.legado.app.ui.about.ReadRecordActivity
+import io.legado.app.ui.autoTask.AutoTaskActivity
 import io.legado.app.ui.book.bookmark.AllBookmarkActivity
 import io.legado.app.ui.book.source.manage.BookSourceActivity
 import io.legado.app.ui.book.toc.rule.TxtTocRuleActivity
@@ -79,6 +83,7 @@ class MyFragment() : BaseFragment(R.layout.fragment_my_config), MainFragmentInte
 
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             putPrefBoolean(PreferKey.webService, WebService.isRun)
+            putPrefBoolean(PreferKey.mcpService, McpService.isRun)
             addPreferencesFromResource(R.xml.pref_main)
             findPreference<SwitchPreference>("webService")?.onLongClick {
                 if (!WebService.isRun) {
@@ -99,6 +104,29 @@ class MyFragment() : BaseFragment(R.layout.fragment_my_config), MainFragmentInte
                         WebService.hostAddress
                     } else {
                         getString(R.string.web_service_desc)
+                    }
+                }
+            }
+            findPreference<SwitchPreference>(PreferKey.mcpService)?.let {
+                it.isChecked = McpService.isRun
+                it.summary = if (McpService.isRun) {
+                    McpService.hostAddress
+                } else {
+                    getString(R.string.mcp_service_desc)
+                }
+                it.onLongClick {
+                    if (!McpService.isRun) return@onLongClick false
+                    context?.sendToClip(it.summary.toString())
+                    true
+                }
+            }
+            observeEventSticky<String>(EventBus.MCP_SERVICE) {
+                findPreference<SwitchPreference>(PreferKey.mcpService)?.let {
+                    it.isChecked = McpService.isRun
+                    it.summary = if (McpService.isRun) {
+                        McpService.hostAddress
+                    } else {
+                        getString(R.string.mcp_service_desc)
                     }
                 }
             }
@@ -138,6 +166,23 @@ class MyFragment() : BaseFragment(R.layout.fragment_my_config), MainFragmentInte
                     }
                 }
 
+                PreferKey.mcpService -> {
+                    if (requireContext().getPrefBoolean(PreferKey.mcpService)) {
+                        McpService.start(requireContext())
+                    } else {
+                        McpService.stop(requireContext())
+                    }
+                }
+
+                PreferKey.autoTaskService -> {
+                    val appContext = requireContext().applicationContext
+                    if (appContext.getPrefBoolean(PreferKey.autoTaskService)) {
+                        Coroutine.async { AutoTaskScheduler.refresh(appContext) }
+                    } else {
+                        AutoTaskScheduler.cancelAll(appContext)
+                    }
+                }
+
                 "recordLog" -> LogUtils.upLevel()
             }
         }
@@ -145,6 +190,7 @@ class MyFragment() : BaseFragment(R.layout.fragment_my_config), MainFragmentInte
         override fun onPreferenceTreeClick(preference: Preference): Boolean {
             when (preference.key) {
                 "bookSourceManage" -> startActivity<BookSourceActivity>()
+                "autoTaskManage" -> startActivity<AutoTaskActivity>()
                 "replaceManage" -> startActivity<ReplaceRuleActivity>()
                 "dictRuleManage" -> startActivity<DictRuleActivity>()
                 "txtTocRuleManage" -> startActivity<TxtTocRuleActivity>()

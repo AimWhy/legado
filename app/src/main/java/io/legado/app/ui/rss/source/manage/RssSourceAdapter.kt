@@ -4,8 +4,6 @@ import android.content.Context
 import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup
-import android.widget.PopupMenu
-import androidx.core.os.bundleOf
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
 import io.legado.app.R
@@ -14,6 +12,7 @@ import io.legado.app.base.adapter.RecyclerAdapter
 import io.legado.app.data.entities.RssSource
 import io.legado.app.databinding.ItemRssSourceBinding
 import io.legado.app.lib.theme.backgroundColor
+import io.legado.app.ui.widget.popupActionMenu
 import io.legado.app.ui.widget.recycler.DragSelectTouchHelper
 import io.legado.app.ui.widget.recycler.ItemTouchCallback
 import io.legado.app.utils.ColorUtils
@@ -130,7 +129,9 @@ class RssSourceAdapter(context: Context, val callBack: CallBack) :
         getItems().forEach {
             selected.add(it)
         }
-        notifyItemRangeChanged(0, itemCount, bundleOf(Pair("selected", null)))
+        notifyItemRangeChanged(0, itemCount, Bundle().apply {
+            putString("selected", null)
+        })
         callBack.upCountView()
     }
 
@@ -142,7 +143,9 @@ class RssSourceAdapter(context: Context, val callBack: CallBack) :
                 selected.add(it)
             }
         }
-        notifyItemRangeChanged(0, itemCount, bundleOf(Pair("selected", null)))
+        notifyItemRangeChanged(0, itemCount, Bundle().apply {
+            putString("selected", null)
+        })
         callBack.upCountView()
     }
 
@@ -161,26 +164,29 @@ class RssSourceAdapter(context: Context, val callBack: CallBack) :
                 selected.add(it)
             }
         }
-        notifyItemRangeChanged(minPosition, itemCount, bundleOf(Pair("selected", null)))
+        notifyItemRangeChanged(minPosition, itemCount, Bundle().apply {
+            putString("selected", null)
+        })
         callBack.upCountView()
     }
 
     private fun showMenu(view: View, position: Int) {
         val source = getItem(position) ?: return
-        val popupMenu = PopupMenu(context, view)
-        popupMenu.inflate(R.menu.rss_source_item)
-        popupMenu.setOnMenuItemClickListener { menuItem ->
-            when (menuItem.itemId) {
-                R.id.menu_top -> callBack.toTop(source)
-                R.id.menu_bottom -> callBack.toBottom(source)
-                R.id.menu_del -> {
+        popupActionMenu(context) {
+            item(context.getString(R.string.to_top), "top")
+            item(context.getString(R.string.to_bottom), "bottom")
+            item(context.getString(R.string.delete), "delete")
+            danger("delete")
+        }.show(view) { action ->
+            when (action) {
+                "top" -> callBack.toTop(source)
+                "bottom" -> callBack.toBottom(source)
+                "delete" -> {
                     callBack.del(source)
                     selected.remove(source)
                 }
             }
-            true
         }
-        popupMenu.show()
     }
 
     override fun swap(srcPosition: Int, targetPosition: Int): Boolean {
@@ -227,7 +233,9 @@ class RssSourceAdapter(context: Context, val callBack: CallBack) :
                     } else {
                         selected.remove(it)
                     }
-                    notifyItemChanged(position, bundleOf(Pair("selected", null)))
+                    notifyItemChanged(position, Bundle().apply {
+                        putString("selected", null)
+                    })
                     callBack.upCountView()
                     return true
                 }

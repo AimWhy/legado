@@ -15,6 +15,28 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 
+private const val REPLACE_RULE_GROUP_FILTER = """
+trim(:groupName, $GROUP_TRIM_CHARACTERS) <> ''
+and exists (
+    with recursive replace_rule_groups(group_name, rest) as (
+        select '',
+            replace(replace(replace(coalesce(t2.`group`, ''), ';', ','), '，', ','), '；', ',') || ','
+        union all
+        select
+            trim(substr(rest, 1, instr(rest, ',') - 1), $GROUP_TRIM_CHARACTERS),
+            substr(rest, instr(rest, ',') + 1)
+        from replace_rule_groups
+        where rest <> ''
+    )
+    select 1
+    from replace_rule_groups
+    where group_name = trim(:groupName, $GROUP_TRIM_CHARACTERS)
+)
+"""
+
+private const val REPLACE_RULE_NO_GROUP_FILTER = """
+trim(coalesce(`group`, ''), $GROUP_TRIM_CHARACTERS) in ('', '未分组')
+"""
 
 @Dao
 interface ReplaceRuleDao {
@@ -31,13 +53,20 @@ interface ReplaceRuleDao {
     @Query("SELECT * FROM replace_rules WHERE isEnabled = 0 ORDER BY sortOrder ASC")
     fun flowDisabled(): Flow<List<ReplaceRule>>
 
-    @Query("SELECT * FROM replace_rules where `group` like :key ORDER BY sortOrder ASC")
-    fun flowGroupSearch(key: String): Flow<List<ReplaceRule>>
+    @Query(
+        """SELECT t2.* FROM replace_rules AS t2
+        WHERE """ + REPLACE_RULE_GROUP_FILTER + """
+        ORDER BY t2.sortOrder ASC"""
+    )
+    fun flowGroupSearch(groupName: String): Flow<List<ReplaceRule>>
 
     @Query("select `group` from replace_rules where `group` is not null and `group` <> ''")
     fun flowGroupsUnProcessed(): Flow<List<String>>
 
-    @Query("select * from replace_rules where `group` is null or trim(`group`) = '' or trim(`group`) like '%未分组%'")
+    @Query(
+        """select * from replace_rules
+        where """ + REPLACE_RULE_NO_GROUP_FILTER
+    )
     fun flowNoGroup(): Flow<List<ReplaceRule>>
 
     @get:Query("SELECT MIN(sortOrder) FROM replace_rules")

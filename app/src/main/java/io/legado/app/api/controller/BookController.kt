@@ -33,11 +33,29 @@ import java.io.File
 import java.util.WeakHashMap
 import java.util.concurrent.TimeUnit
 
+private val windowsDrivePrefix = Regex("^[A-Za-z]:")
+
+internal fun requireSafeUploadedBookFileName(fileName: String): String {
+    val isUnsafe = fileName.isBlank() ||
+            fileName == "." ||
+            fileName == ".." ||
+            fileName.indexOfAny(charArrayOf('/', '\\')) >= 0 ||
+            windowsDrivePrefix.containsMatchIn(fileName) ||
+            fileName.any { Character.isISOControl(it) }
+    require(!isUnsafe) { "Invalid uploaded book file name" }
+    return fileName
+}
+
 object BookController {
 
-    private lateinit var book: Book
-    private var bookSource: BookSource? = null
-    private var bookUrl: String = ""
+    private data class ImageContext(
+        val bookUrl: String,
+        val book: Book,
+        val bookSource: BookSource?,
+    )
+
+    @Volatile
+    private var cachedImageContext: ImageContext? = null
     private val defaultCoverCache by lazy { WeakHashMap<Drawable, Bitmap>() }
 
     /**
@@ -99,19 +117,23 @@ object BookController {
     fun getImg(parameters: Map<String, List<String>>): ReturnData {
         val returnData = ReturnData()
         val bookUrl = parameters["url"]?.firstOrNull()
-            ?: return returnData.setErrorMsg("bookUrl为空")
+        if (bookUrl.isNullOrBlank()) {
+            return returnData.setErrorMsg("bookUrl为空")
+        }
         val src = parameters["path"]?.firstOrNull()
             ?: return returnData.setErrorMsg("图片链接为空")
         val width = parameters["width"]?.firstOrNull()?.toInt() ?: 640
-        if (this.bookUrl != bookUrl) {
-            this.book = appDb.bookDao.getBook(bookUrl)
-                ?: return returnData.setErrorMsg("bookUrl不对")
-            this.bookSource = appDb.bookSourceDao.getBookSource(book.origin)
-        }
-        this.bookUrl = bookUrl
+        val cachedContext = cachedImageContext
+        val imageContext = cachedContext?.takeIf { it.bookUrl == bookUrl }
+            ?: appDb.bookDao.getBook(bookUrl)?.let { book ->
+                val bookSource = appDb.bookSourceDao.getBookSource(book.origin)
+                ImageContext(bookUrl, book, bookSource).also {
+                    cachedImageContext = it
+                }
+            } ?: return returnData.setErrorMsg("bookUrl不对")
         val bitmap = runBlocking {
-            ImageProvider.cacheImage(book, src, bookSource)
-            ImageProvider.getImage(book, src, width)
+            ImageProvider.cacheImage(imageContext.book, src, imageContext.bookSource)
+            ImageProvider.getImage(imageContext.book, src, width)
         }
         return returnData.setData(bitmap)
     }
@@ -285,8 +307,13 @@ object BookController {
         files: Map<String, String>
     ): ReturnData {
         val returnData = ReturnData()
-        val fileName = parameters["fileName"]?.firstOrNull()
+        val rawFileName = parameters["fileName"]?.firstOrNull()
             ?: return returnData.setErrorMsg("fileName 不能为空")
+        val fileName = kotlin.runCatching {
+            requireSafeUploadedBookFileName(rawFileName)
+        }.getOrElse {
+            return returnData.setErrorMsg("fileName 格式不正确")
+        }
         val fileData = files["fileData"]
             ?: return returnData.setErrorMsg("fileData 不能为空")
         kotlin.runCatching {

@@ -15,6 +15,29 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 
+private const val RSS_SOURCE_GROUP_FILTER = """
+trim(:sourceGroup, $GROUP_TRIM_CHARACTERS) <> ''
+and exists (
+    with recursive rss_source_groups(group_name, rest) as (
+        select '',
+            replace(replace(replace(coalesce(t2.sourceGroup, ''), ';', ','), '，', ','), '；', ',') || ','
+        union all
+        select
+            trim(substr(rest, 1, instr(rest, ',') - 1), $GROUP_TRIM_CHARACTERS),
+            substr(rest, instr(rest, ',') + 1)
+        from rss_source_groups
+        where rest <> ''
+    )
+    select 1
+    from rss_source_groups
+    where group_name = trim(:sourceGroup, $GROUP_TRIM_CHARACTERS)
+)
+"""
+
+private const val RSS_SOURCE_NO_GROUP_FILTER = """
+trim(coalesce(sourceGroup, ''), $GROUP_TRIM_CHARACTERS) in ('', '未分组')
+"""
+
 @Dao
 interface RssSourceDao {
 
@@ -23,6 +46,9 @@ interface RssSourceDao {
 
     @Query("select * from rssSources where sourceUrl in (:sourceUrls)")
     fun getRssSources(vararg sourceUrls: String): List<RssSource>
+
+    @Query("select sourceUrl from rssSources where sourceUrl in (:sourceUrls)")
+    fun findExistingSourceUrls(sourceUrls: List<String>): List<String>
 
     @get:Query("SELECT * FROM rssSources order by customOrder")
     val all: List<RssSource>
@@ -44,14 +70,11 @@ interface RssSourceDao {
     fun flowSearch(key: String): Flow<List<RssSource>>
 
     @Query(
-        """SELECT * FROM rssSources 
-        where (sourceGroup = :key
-        or sourceGroup like :key || ',%' 
-        or sourceGroup like  '%,' || :key
-        or sourceGroup like  '%,' || :key || ',%')
-        order by customOrder"""
+        """SELECT t2.* FROM rssSources AS t2
+        where """ + RSS_SOURCE_GROUP_FILTER + """
+        order by t2.customOrder"""
     )
-    fun flowGroupSearch(key: String): Flow<List<RssSource>>
+    fun flowGroupSearch(sourceGroup: String): Flow<List<RssSource>>
 
     @Query("SELECT * FROM rssSources where enabled = 1 order by customOrder")
     fun flowEnabled(): Flow<List<RssSource>>
@@ -62,7 +85,10 @@ interface RssSourceDao {
     @Query("select * from rssSources where loginUrl is not null and loginUrl != ''")
     fun flowLogin(): Flow<List<RssSource>>
 
-    @Query("select * from rssSources where sourceGroup is null or sourceGroup = '' or sourceGroup like '%未分组%'")
+    @Query(
+        """select * from rssSources
+        where """ + RSS_SOURCE_NO_GROUP_FILTER
+    )
     fun flowNoGroup(): Flow<List<RssSource>>
 
     @Query(
@@ -77,14 +103,12 @@ interface RssSourceDao {
     fun flowEnabled(searchKey: String): Flow<List<RssSource>>
 
     @Query(
-        """SELECT * FROM rssSources 
-        where enabled = 1 and (sourceGroup = :searchKey
-        or sourceGroup like :searchKey || ',%' 
-        or sourceGroup like  '%,' || :searchKey
-        or sourceGroup like  '%,' || :searchKey || ',%') 
-        order by customOrder"""
+        """SELECT t2.* FROM rssSources AS t2
+        where t2.enabled = 1
+        and """ + RSS_SOURCE_GROUP_FILTER + """
+        order by t2.customOrder"""
     )
-    fun flowEnabledByGroup(searchKey: String): Flow<List<RssSource>>
+    fun flowEnabledByGroup(sourceGroup: String): Flow<List<RssSource>>
 
     @Query("select distinct sourceGroup from rssSources where trim(sourceGroup) <> ''")
     fun flowGroupsUnProcessed(): Flow<List<String>>

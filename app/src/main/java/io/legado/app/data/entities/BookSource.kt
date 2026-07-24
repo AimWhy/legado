@@ -96,6 +96,8 @@ data class BookSource(
     var ruleContent: ContentRule? = null,
     // 段评规则
     var ruleReview: ReviewRule? = null,
+    // 纯 JavaScript 单文件书源主脚本，非空时优先使用脚本抓取流程
+    var mainJs: String? = null,
     @ColumnInfo(defaultValue = "0")
     var eventListener: Boolean = false, // 是否监听事件来执行回调规则
     @ColumnInfo(defaultValue = "0")
@@ -233,6 +235,12 @@ data class BookSource(
         }
     }
 
+    fun isJsSource(): Boolean = !mainJs.isNullOrBlank()
+
+    override fun getLoginJs(): String? {
+        return if (isJsSource()) mainJs else super.getLoginJs()
+    }
+
     fun equal(source: BookSource): Boolean {
         return equal(bookSourceName, source.bookSourceName)
                 && equal(bookSourceUrl, source.bookSourceUrl)
@@ -247,6 +255,7 @@ data class BookSource(
                 && equal(variableComment, source.variableComment)
                 && equal(concurrentRate, source.concurrentRate)
                 && equal(jsLib, source.jsLib)
+                && equal(mainJs, source.mainJs)
                 && equal(header, source.header)
                 && equal(loginUrl, source.loginUrl)
                 && equal(loginUi, source.loginUi)
@@ -259,6 +268,7 @@ data class BookSource(
                 && getBookInfoRule() == source.getBookInfoRule()
                 && getTocRule() == source.getTocRule()
                 && getContentRule() == source.getContentRule()
+                && ruleReview == source.ruleReview
     }
 
     private fun equal(a: String?, b: String?) = a == b || (a.isNullOrEmpty() && b.isNullOrEmpty())
@@ -306,10 +316,12 @@ data class BookSource(
             GSON.fromJsonObject<ContentRule>(json).getOrNull()
 
         @TypeConverter
-        fun stringToReviewRule(json: String?): ReviewRule? = null
+        fun stringToReviewRule(json: String?) =
+            GSON.fromJsonObject<ReviewRule>(json).getOrNull()
 
         @TypeConverter
-        fun reviewRuleToString(reviewRule: ReviewRule?): String = "null"
+        fun reviewRuleToString(reviewRule: ReviewRule?): String =
+            GSON.toJson(reviewRule)
 
     }
 }

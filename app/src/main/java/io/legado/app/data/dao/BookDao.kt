@@ -9,6 +9,8 @@ import androidx.room.Transaction
 import androidx.room.Update
 import io.legado.app.constant.BookType
 import io.legado.app.data.entities.Book
+import io.legado.app.data.entities.BookCacheCleanupSnapshot
+import io.legado.app.data.entities.BookCacheInfo
 import io.legado.app.data.entities.BookGroup
 import io.legado.app.data.entities.BookSource
 import io.legado.app.help.book.isNotShelf
@@ -116,17 +118,51 @@ interface BookDao {
     @get:Query("SELECT * FROM books")
     val all: List<Book>
 
+    @Query("SELECT bookUrl, name, origin, originName, type FROM books")
+    fun getCacheCleanupBooks(): List<BookCacheInfo>
+
+    @Query("SELECT * FROM books WHERE (type & ${BookType.image}) > 0")
+    fun getCacheCleanupImageBooks(): List<Book>
+
+    @Transaction
+    fun getCacheCleanupSnapshot(includeImageBooks: Boolean): BookCacheCleanupSnapshot {
+        return BookCacheCleanupSnapshot(
+            books = getCacheCleanupBooks(),
+            imageBooks = if (includeImageBooks) getCacheCleanupImageBooks() else emptyList(),
+        )
+    }
+
     @Query("SELECT * FROM books where type & :type > 0 and type & ${BookType.local} = 0")
     fun getByTypeOnLine(type: Int): List<Book>
 
     @get:Query("SELECT * FROM books where type & ${BookType.text} > 0 ORDER BY durChapterTime DESC limit 1")
     val lastReadBook: Book?
 
+    @get:Query(
+        "SELECT * FROM books where type & ${BookType.notShelf} = 0 " +
+            "ORDER BY (durChapterIndex > 0 OR durChapterPos > 0) DESC, " +
+            "durChapterTime DESC limit 1"
+    )
+    val lastReadBookOnShelf: Book?
+
     @get:Query("SELECT bookUrl FROM books")
     val allBookUrls: List<String>
 
+    @Query("SELECT bookUrl FROM books WHERE bookUrl IN (:bookUrls)")
+    fun findExistingBookUrls(bookUrls: List<String>): List<String>
+
     @get:Query("SELECT COUNT(*) FROM books")
     val allBookCount: Int
+
+    @Query("SELECT COUNT(*) FROM books where type & ${BookType.notShelf} = 0")
+    fun flowShelfBookCount(): Flow<Int>
+
+    @get:Query(
+        "SELECT count(*) FROM books where " +
+            "(durChapterIndex > 0 OR durChapterPos > 0) " +
+            "and type & ${BookType.notShelf} = 0"
+    )
+    val readingCount: Int
 
     @get:Query("select min(`order`) from books")
     val minOrder: Int

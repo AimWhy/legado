@@ -22,6 +22,7 @@ import io.legado.app.help.http.SSLHelper
 import io.legado.app.help.http.StrResponse
 import io.legado.app.help.source.SourceHelp
 import io.legado.app.help.source.SourceVerificationHelp
+import io.legado.app.help.source.VerificationResult
 import io.legado.app.help.source.getSourceType
 import io.legado.app.model.Debug
 import io.legado.app.model.analyzeRule.AnalyzeUrl
@@ -46,6 +47,7 @@ import io.legado.app.utils.externalCache
 import io.legado.app.utils.fromJsonObject
 import io.legado.app.utils.isAbsUrl
 import io.legado.app.utils.isMainThread
+import io.legado.app.utils.isSameOrDescendantOf
 import io.legado.app.utils.longToastOnUi
 import io.legado.app.utils.mapAsync
 import io.legado.app.utils.showDialogFragment
@@ -61,7 +63,10 @@ import kotlinx.coroutines.runBlocking
 import okio.use
 import org.jsoup.Connection
 import org.jsoup.Jsoup
-import org.mozilla.javascript.Function
+import org.htmlunit.corejs.javascript.Function
+import org.htmlunit.corejs.javascript.Scriptable
+import org.htmlunit.corejs.javascript.ScriptableObject
+import org.htmlunit.corejs.javascript.Undefined
 import splitties.init.appCtx
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -365,11 +370,20 @@ interface JsExtensions : JsEncodeUtils {
 
     fun startBrowserAwait(url: String, title: String, refetchAfterSuccess: Boolean, html: String?): StrResponse {
         rhinoContext.ensureActive()
-        val pair = SourceVerificationHelp.getVerificationResult(
-            getSource(), url, title, true, refetchAfterSuccess, html
-        )
-        val (url2, body) = pair
-        return StrResponse(url2.ifEmpty { url }, body)
+        return when (val result = SourceVerificationHelp.getVerificationResult(
+            getSource(), url, title, true, refetchAfterSuccess, html, context
+        )) {
+            is VerificationResult.Response -> {
+                val (url2, body) = result.value
+                StrResponse(url2.ifEmpty { url }, body)
+            }
+
+            VerificationResult.Refetch -> AnalyzeUrl(
+                url,
+                source = getSource(),
+                coroutineContext = context
+            ).getStrResponse(useWebView = false)
+        }
     }
 
     /**
@@ -377,7 +391,11 @@ interface JsExtensions : JsEncodeUtils {
      */
     fun getVerificationCode(imageUrl: String): String {
         rhinoContext.ensureActive()
-        return SourceVerificationHelp.getVerificationResult(getSource(), imageUrl, "", false).second
+        val result = SourceVerificationHelp.getVerificationResult(
+            getSource(), imageUrl, "", false, coroutineContext = context
+        )
+        check(result is VerificationResult.Response)
+        return result.value.second
     }
 
     /**
@@ -739,8 +757,8 @@ interface JsExtensions : JsEncodeUtils {
             cachePath + File.separator + path
         }
         val file = File(aPath)
-        val safePath = appCtx.externalCache.parent!!
-        if (!file.canonicalPath.startsWith(safePath)) {
+        val safeDir = appCtx.externalCache.parentFile!!
+        if (!file.isSameOrDescendantOf(safeDir)) {
             throw SecurityException("非法路径")
         }
         return file
@@ -1233,8 +1251,14 @@ interface JsExtensions : JsEncodeUtils {
     ) {
         SourceLock.singleFlight(sourceConcurrencyKey(name), timeoutMs) {
             val cx = rhinoContext
-            action.call(cx, action.parentScope, action.parentScope, emptyArray<Any?>())
+            action.call(cx, action.parentScope, functionThisObj(action), emptyArray<Any?>())
         }
+    }
+
+    private fun functionThisObj(action: Function): Scriptable {
+        val top = action.parentScope?.let { ScriptableObject.getTopLevelScope(it) }
+        return top?.globalThis
+            ?: Undefined.SCRIPTABLE_UNDEFINED
     }
 
     fun singleFlight(
@@ -1249,7 +1273,7 @@ interface JsExtensions : JsEncodeUtils {
     ) {
         SourceLock.lock(sourceConcurrencyKey(name), timeoutMs) {
             val cx = rhinoContext
-            action.call(cx, action.parentScope, action.parentScope, emptyArray<Any?>())
+            action.call(cx, action.parentScope, functionThisObj(action), emptyArray<Any?>())
         }
     }
 

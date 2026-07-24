@@ -6,11 +6,14 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.TextUtils
+import android.text.style.LeadingMarginSpan
 import android.view.LayoutInflater
 import android.view.Menu
 import android.view.MenuItem
 import android.view.MotionEvent
-import io.legado.app.ui.widget.text.ScrollTextView
 import android.view.textclassifier.TextClassifier
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
@@ -85,6 +88,7 @@ import io.legado.app.ui.video.VideoPlayerActivity
 import io.legado.app.ui.widget.dialog.PhotoDialog
 import io.legado.app.ui.widget.dialog.VariableDialog
 import io.legado.app.ui.widget.dialog.WaitDialog
+import io.legado.app.ui.widget.text.ScrollTextView
 import io.legado.app.utils.ColorUtils
 import io.legado.app.utils.ConvertUtils
 import io.legado.app.utils.FileDoc
@@ -111,8 +115,10 @@ import io.noties.markwon.ext.tables.TablePlugin
 import io.noties.markwon.html.HtmlPlugin
 import io.noties.markwon.image.glide.GlideImagesPlugin
 import kotlinx.coroutines.Dispatchers.IO
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 class BookInfoActivity :
     VMBaseActivity<ActivityBookInfoBinding, BookInfoViewModel>(toolBarTheme = Theme.Dark, showOpenMenuIcon = false),
@@ -123,23 +129,13 @@ class BookInfoActivity :
 
     private val tocActivityResult = registerForActivityResult(TocActivityResult()) {
         it?.let {
-            viewModel.getBook(false)?.let { book ->
-                lifecycleScope.launch {
-                    withContext(IO) {
-                        val durChapterIndex = it[0] as Int
-                        val durChapterPos = it[1] as Int
-                        val durVolumeIndex = it[3] as Int
-                        val chapterInVolumeIndex = it[4] as Int
-                        book.durChapterIndex = durChapterIndex
-                        book.durChapterPos = durChapterPos
-                        chapterChanged = it[2] as Boolean
-                        book.durVolumeIndex = durVolumeIndex
-                        book.chapterInVolumeIndex = chapterInVolumeIndex
-                        appDb.bookDao.update(book)
-                    }
-                    startReadActivity(book)
-                }
-            }
+            readFromChapter(
+                index = it[0] as Int,
+                pos = it[1] as Int,
+                changed = it[2] as Boolean,
+                volumeIndex = it[3] as Int,
+                chapterInVolumeIndex = it[4] as Int,
+            )
         } ?: let {
             if (!viewModel.inBookshelf) {
                 viewModel.delBook() //进目录会保存book，此时退出目录触发的book删除，不通知书源回调
@@ -196,14 +192,23 @@ class BookInfoActivity :
     override val binding by viewBinding(ActivityBookInfoBinding::inflate)
     override val viewModel by viewModels<BookInfoViewModel>()
     private var isIntroTextViewAttached = false
-    private val introTextView by lazy {
+    private var introContent: String? = null
+    private var introExpanded = false
+    private var introCanCollapse = false
+    private var introRenderGeneration = 0
+    private var introRenderJob: Job? = null
+    private val introTextViewDelegate = lazy {
         val inflater = LayoutInflater.from(this)
         val view = inflater.inflate(R.layout.view_book_intro, binding.tvIntroContainer, false) as ScrollTextView
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N_MR1) {
             view.revealOnFocusHint = false
         }
+        view.onTextLayoutChanged = {
+            updateIntroOverflow()
+        }
         view
     }
+    private val introTextView by introTextViewDelegate
 
     private var pooledWebView: PooledWebView? = null
 
@@ -235,6 +240,7 @@ class BookInfoActivity :
     override fun onActivityCreated(savedInstanceState: Bundle?) {
         binding.titleBar.setBackgroundResource(R.color.transparent)
         binding.refreshLayout?.setColorSchemeColors(accentColor)
+        binding.refreshProgressBar.secondColor = accentColor
         binding.arcView?.setBgColor(backgroundColor)
         binding.llInfo.setBackgroundColor(backgroundColor)
         binding.ivCoverC.setCardBackgroundColor(backgroundColor)
@@ -243,7 +249,17 @@ class BookInfoActivity :
         binding.tvShelf.setTextColor(getPrimaryTextColor(ColorUtils.isColorLight(bottomBackground)))
         binding.tvToc.text = getString(R.string.toc_s, getString(R.string.loading))
         viewModel.bookData.observe(this) { showBook(it) }
-        viewModel.chapterListData.observe(this) { upLoading(false, it) }
+        viewModel.chapterListData.observe(this) {
+            upLoading(viewModel.loadingData.value == true, it)
+        }
+        viewModel.loadingData.observe(this) { isLoading ->
+            binding.refreshProgressBar.isAutoLoading = isLoading
+            if (isLoading) {
+                upLoading(true)
+            } else {
+                viewModel.chapterListData.value?.let { upLoading(false, it) }
+            }
+        }
         viewModel.waitDialogData.observe(this) { upWaitDialogStatus(it) }
         viewModel.initData(intent)
         initViewEvent()
@@ -264,7 +280,7 @@ class BookInfoActivity :
         menu.findItem(R.id.menu_split_long_chapter)?.isChecked =
             viewModel.bookData.value?.getSplitLongChapter() ?: true
         menu.findItem(R.id.menu_login)?.isVisible =
-            !viewModel.bookSource?.loginUrl.isNullOrBlank()
+            viewModel.bookSource?.hasLogin() == true
         menu.findItem(R.id.menu_set_source_variable)?.isVisible =
             viewModel.bookSource != null
         menu.findItem(R.id.menu_set_book_variable)?.isVisible =
@@ -541,19 +557,36 @@ class BookInfoActivity :
     private fun showBookIntro(book: Book) {
         val intro = book.getDisplayIntro()
         if (intro.isNullOrBlank()) {
+            introContent = null
+            introExpanded = false
+            introCanCollapse = false
+            introRenderGeneration++
+            introRenderJob?.cancel()
             destroyWeb()
             binding.tvIntroContainer.removeAllViews()
             isIntroTextViewAttached = false
             binding.tvIntroContainer.gone()
+            updateIntroToggle()
             return
         }
+        if (intro != introContent) {
+            introContent = intro
+            introExpanded = true
+            introCanCollapse = false
+        }
+        val renderGeneration = ++introRenderGeneration
+        introRenderJob?.cancel()
         binding.tvIntroContainer.visible()
         if (intro.startsWith("<useweb>")) {
             val lastIndex = intro.lastIndexOf("<")
             if (lastIndex < 8) {
-                introTextView.text = intro
+                val tvIntro = prepareIntroTextView()
+                tvIntro.text = intro
+                scheduleIntroOverflowCheck(renderGeneration)
                 return
             }
+            introCanCollapse = false
+            updateIntroToggle()
             val html = intro.substring(8, lastIndex)
             val pooledWebView = this.pooledWebView ?: let{
                 val pooledWebView = WebViewPool.acquire(this)
@@ -581,18 +614,12 @@ class BookInfoActivity :
             webView.loadDataWithBaseURL(bookUrl, html, "text/html", "utf-8", bookUrl)
             return
         }
-        val tvIntro = introTextView
-        if (!isIntroTextViewAttached || pooledWebView != null) {
-            destroyWeb()
-            binding.tvIntroContainer.removeAllViews()
-            tvIntro.text = null
-            binding.tvIntroContainer.addView(tvIntro)
-            isIntroTextViewAttached = true
-        }
+        val tvIntro = prepareIntroTextView()
         if (intro.startsWith("<usehtml>")) {
             val lastIndex = intro.lastIndexOf("<")
             if (lastIndex < 9) {
                 tvIntro.text = intro
+                scheduleIntroOverflowCheck(renderGeneration)
                 return
             }
             val html = intro.substring(9, lastIndex)
@@ -607,14 +634,17 @@ class BookInfoActivity :
                     viewModel.onButtonClick(this@BookInfoActivity, "info image" , it)
                 }
             )
+            scheduleIntroOverflowCheck(renderGeneration)
         } else if (intro.startsWith("<md>")) {
             val lastIndex = intro.lastIndexOf("<")
             if (lastIndex < 4) {
                 tvIntro.text = intro
+                scheduleIntroOverflowCheck(renderGeneration)
                 return
             }
             val mark = intro.substring(4, lastIndex)
-            lifecycleScope.launch {
+            tvIntro.text = null
+            introRenderJob = lifecycleScope.launch {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     tvIntro.setTextClassifier(TextClassifier.NO_OP)
                 }
@@ -637,6 +667,7 @@ class BookInfoActivity :
                         .build()
                     markwon.toMarkdown(mark)
                 }
+                if (renderGeneration != introRenderGeneration) return@launch
                 tvIntro.setMarkdown(
                     markwon,
                     markdown,
@@ -644,10 +675,113 @@ class BookInfoActivity :
                         showDialogFragment(PhotoDialog(source, viewModel.bookSource?.bookSourceUrl))
                     }
                 )
+                scheduleIntroOverflowCheck(renderGeneration)
             }
         } else {
-            tvIntro.text = intro
+            setPlainBookIntro(tvIntro, intro)
+            scheduleIntroOverflowCheck(renderGeneration)
         }
+    }
+
+    private fun setPlainBookIntro(textView: ScrollTextView, intro: String) {
+        val ranges = introIndentRanges(intro)
+        if (ranges.isEmpty()) {
+            textView.text = intro
+            return
+        }
+        val indentWidth = textView.paint.measureText("　　").roundToInt().coerceAtLeast(1)
+        textView.text = SpannableString(intro).apply {
+            ranges.forEach { range ->
+                setSpan(
+                    LeadingMarginSpan.Standard(indentWidth, 0),
+                    range.start,
+                    range.endExclusive,
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                )
+            }
+        }
+    }
+
+    private fun prepareIntroTextView(): ScrollTextView {
+        val tvIntro = introTextView
+        if (!isIntroTextViewAttached || pooledWebView != null) {
+            destroyWeb()
+            binding.tvIntroContainer.removeAllViews()
+            tvIntro.text = null
+            binding.tvIntroContainer.addView(tvIntro)
+            isIntroTextViewAttached = true
+        }
+        applyIntroCollapseState(tvIntro)
+        return tvIntro
+    }
+
+    private fun applyIntroCollapseState(tvIntro: ScrollTextView = introTextView) {
+        tvIntro.internalScrollEnabled = false
+        tvIntro.maxLines = if (introExpanded) Int.MAX_VALUE else BookIntroCollapse.COLLAPSED_LINES
+        tvIntro.maxMeasuredHeight = if (introExpanded) {
+            null
+        } else {
+            collapsedIntroHeight(tvIntro)
+        }
+        tvIntro.ellipsize = if (introExpanded) null else TextUtils.TruncateAt.END
+        if (!introExpanded) {
+            tvIntro.scrollTo(0, 0)
+        }
+        updateIntroToggle()
+        tvIntro.requestLayout()
+    }
+
+    private fun collapsedIntroHeight(tvIntro: ScrollTextView): Int =
+        tvIntro.lineHeight * BookIntroCollapse.COLLAPSED_LINES +
+            tvIntro.compoundPaddingTop + tvIntro.compoundPaddingBottom
+
+    private fun scheduleIntroOverflowCheck(renderGeneration: Int) {
+        introTextView.post {
+            if (renderGeneration == introRenderGeneration &&
+                lifecycle.currentState != Lifecycle.State.DESTROYED
+            ) {
+                updateIntroOverflow()
+            }
+        }
+    }
+
+    private fun updateIntroOverflow() {
+        if (!isIntroTextViewAttached || pooledWebView != null) return
+        val tvIntro = introTextView
+        val textLayout = tvIntro.layout ?: return
+        val lineCount = textLayout.lineCount
+        if (lineCount <= 0) return
+        val lastLine = lineCount - 1
+        val collapsedHeight = collapsedIntroHeight(tvIntro)
+        val canCollapse = tvIntro.isMeasuredHeightLimited || BookIntroCollapse.hasOverflow(
+            expanded = introExpanded,
+            lineCount = lineCount,
+            lastLineEllipsisCount = textLayout.getEllipsisCount(lastLine),
+            lastLineEnd = textLayout.getLineEnd(lastLine),
+            textLength = tvIntro.text.length,
+            contentHeight = textLayout.height +
+                tvIntro.compoundPaddingTop + tvIntro.compoundPaddingBottom,
+            collapsedContentHeight = collapsedHeight,
+        )
+        if (introCanCollapse != canCollapse) {
+            introCanCollapse = canCollapse
+            updateIntroToggle()
+        }
+    }
+
+    private fun updateIntroToggle() = binding.tvIntroToggle.run {
+        if (!introCanCollapse || !isIntroTextViewAttached || pooledWebView != null) {
+            gone()
+            return@run
+        }
+        setText(
+            if (introExpanded) {
+                R.string.book_intro_collapse
+            } else {
+                R.string.book_intro_expand
+            }
+        )
+        visible()
     }
 
     private fun upKinds(book: Book) = binding.run {
@@ -762,6 +896,12 @@ class BookInfoActivity :
     }
 
     private fun initViewEvent() = binding.run {
+        tvIntroToggle.setOnClickListener {
+            if (!introCanCollapse || !isIntroTextViewAttached) return@setOnClickListener
+            introExpanded = !introExpanded
+            applyIntroCollapseState()
+            scheduleIntroOverflowCheck(introRenderGeneration)
+        }
         ivCover.setOnClickListener {
             viewModel.getBook()?.let {
                 showDialogFragment(
@@ -823,16 +963,19 @@ class BookInfoActivity :
                 toastOnUi(R.string.chapter_list_empty)
                 return@setOnClickListener
             }
-            viewModel.getBook()?.let { book ->
-                if (!viewModel.inBookshelf) {
-                    viewModel.saveBook(book) { //点击目录会保存book
-                        viewModel.saveChapterList {
-                            openChapterList()
-                        }
+            val book = viewModel.getBook(false)
+            if (book == null) {
+                toastOnUi(R.string.book_not_exist)
+                return@setOnClickListener
+            }
+            if (!viewModel.inBookshelf) {
+                viewModel.saveBook(book) { //点击目录会保存book
+                    viewModel.saveChapterList {
+                        openChapterList()
                     }
-                } else {
-                    openChapterList()
                 }
+            } else {
+                openChapterList()
             }
         }
         tvChangeGroup.setOnClickListener {
@@ -1010,6 +1153,31 @@ class BookInfoActivity :
         }
     }
 
+    private fun readFromChapter(
+        index: Int,
+        pos: Int,
+        changed: Boolean,
+        volumeIndex: Int,
+        chapterInVolumeIndex: Int,
+    ) {
+        viewModel.getBook(false)?.let { book ->
+            book.durChapterIndex = index
+            book.durChapterPos = pos
+            chapterChanged = changed
+            book.durVolumeIndex = volumeIndex
+            book.chapterInVolumeIndex = chapterInVolumeIndex
+            if (!viewModel.inBookshelf) {
+                book.addType(BookType.notShelf)
+            }
+            lifecycleScope.launch {
+                withContext(IO) {
+                    appDb.bookDao.update(book)
+                }
+                startReadActivity(book)
+            }
+        }
+    }
+
     private fun showWebFileDownloadAlert(
         onClick: ((Book) -> Unit)? = null,
     ) {
@@ -1175,6 +1343,10 @@ class BookInfoActivity :
      }
 
     override fun onDestroy() {
+        introRenderJob?.cancel()
+        if (introTextViewDelegate.isInitialized()) {
+            introTextView.onTextLayoutChanged = null
+        }
         destroyWeb()
         super.onDestroy()
         if (initGetter) {

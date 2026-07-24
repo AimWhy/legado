@@ -7,6 +7,7 @@ import com.script.buildScriptBindings
 import com.script.rhino.RhinoScriptEngine
 import io.legado.app.constant.AppConst
 import io.legado.app.constant.AppLog
+import io.legado.app.constant.AppPattern.JS_PATTERN
 import io.legado.app.data.entities.rule.RowUi
 import io.legado.app.help.CacheManager
 import io.legado.app.help.ConcurrentRateLimiter.Companion.updateConcurrentRate
@@ -16,7 +17,10 @@ import io.legado.app.help.crypto.SymmetricCryptoAndroid
 import io.legado.app.help.http.CookieStore
 import io.legado.app.help.source.clearExploreKindsCache
 import io.legado.app.help.source.getShareScope
+import io.legado.app.help.source.getSharedGlobalStateKey
+import io.legado.app.model.SharedJsScope
 import io.legado.app.model.SharedJsScope.remove
+import io.legado.app.model.jsSource.JsSourceEngine
 import io.legado.app.utils.GSON
 import io.legado.app.utils.GSONStrict
 import io.legado.app.utils.fromJsonArray
@@ -25,6 +29,26 @@ import io.legado.app.utils.has
 import io.legado.app.utils.isMainThread
 import kotlinx.coroutines.runBlocking
 import org.intellij.lang.annotations.Language
+
+internal object LoginInfoMapInitialization {
+    private val initializingSourceKeys = ThreadLocal<MutableSet<String>>()
+
+    fun <T> run(sourceKey: String, onReentry: () -> T, block: () -> T): T {
+        val activeKeys = initializingSourceKeys.get()
+            ?: mutableSetOf<String>().also(initializingSourceKeys::set)
+        if (!activeKeys.add(sourceKey)) {
+            return onReentry()
+        }
+        return try {
+            block()
+        } finally {
+            activeKeys.remove(sourceKey)
+            if (activeKeys.isEmpty()) {
+                initializingSourceKeys.remove()
+            }
+        }
+    }
+}
 
 /**
  * 可在js里调用,source.xxx()
@@ -69,14 +93,31 @@ interface BaseSource : JsExtensions {
         return this
     }
 
+    private fun extractInlineJs(rule: String?): String? {
+        val text = rule?.trim().orEmpty()
+        if (text.isBlank()) return null
+        val matcher = JS_PATTERN.matcher(text)
+        if (!matcher.matches()) return null
+        return (matcher.group(1) ?: matcher.group(2))?.trim()
+    }
+
+    fun getLoginUiJs(): String? {
+        return extractInlineJs(loginUi)
+    }
+
     fun getLoginJs(): String? {
-        val loginJs = loginUrl
-        return when {
-            loginJs == null -> null
-            loginJs.startsWith("@js:") -> loginJs.substring(4)
-            loginJs.startsWith("<js>") -> loginJs.substring(4, loginJs.lastIndexOf("<"))
-            else -> loginJs
-        }
+        val loginRule = loginUrl?.trim()
+        if (loginRule.isNullOrBlank()) return null
+        return extractInlineJs(loginRule) ?: loginRule
+    }
+
+    fun hasLoginForm(): Boolean {
+        val form = loginUi?.trim().orEmpty()
+        return form.isNotEmpty() && form.filterNot { it.isWhitespace() } != "[]"
+    }
+
+    fun hasLogin(): Boolean {
+        return !loginUrl.isNullOrBlank() || hasLoginForm()
     }
 
     /**
@@ -105,10 +146,12 @@ interface BaseSource : JsExtensions {
         header?.let {
             try {
                 val json = when {
-                    it.startsWith("@js:", true) -> evalJS(it.substring(4)).toString()
-                    it.startsWith("<js>", true) -> evalJS(
-                        it.substring(4, it.lastIndexOf("<"))
-                    ).toString()
+                    it.startsWith("@js:", true) ->
+                        JsSourceEngine.normalizeJsResult(evalJS(it.substring(4))).orEmpty()
+
+                    it.startsWith("<js>", true) -> JsSourceEngine.normalizeJsResult(
+                        evalJS(it.substring(4, it.lastIndexOf("<")))
+                    ).orEmpty()
 
                     else -> it
                 }
@@ -185,33 +228,35 @@ interface BaseSource : JsExtensions {
     }
 
     fun getLoginInfoMap(): MutableMap<String, String> {
-        val json = getLoginInfo() ?: if (loginUi.isNullOrBlank()) {
-            return mutableMapOf()
-        } else {
-            val loginUiJson = loginUi?.let {
-                when {
-                    it.startsWith("@js:") -> evalJS(
-                        "${getLoginJs() ?: ""}\n${it.substring(4)}",
+        getLoginInfo()?.let { json ->
+            return GSON.fromJsonObject<MutableMap<String, String>>(json).getOrNull()
+                ?: mutableMapOf()
+        }
+        val loginUiRule = loginUi?.trim().takeUnless { it.isNullOrBlank() } ?: return mutableMapOf()
+        return LoginInfoMapInitialization.run(
+            sourceKey = getKey(),
+            onReentry = { mutableMapOf<String, String>() },
+        ) {
+            // Dynamic login UI scripts can read login info while their defaults are being derived.
+            val loginUiJs = extractInlineJs(loginUiRule)
+            val loginUiJson = if (loginUiJs != null) {
+                JsSourceEngine.normalizeJsResult(
+                    evalJS(
+                        "${getLoginJs() ?: ""}\n$loginUiJs",
                         configureScriptBindings()
-                    ).toString()
-
-                    it.startsWith("<js>") -> evalJS(
-                        "${getLoginJs() ?: ""}\n${it.substring(4, it.lastIndexOf("<"))}",
-                        configureScriptBindings()
-                    ).toString()
-
-                    else -> it
-                }
+                    )
+                ).orEmpty()
+            } else {
+                loginUiRule
             }
-            val longinInfo = GSON.fromJsonArray<RowUi>(loginUiJson).getOrNull()
+            val loginInfo = GSON.fromJsonArray<RowUi>(loginUiJson).getOrNull()
                 ?.filter { it.type != "button" }
                 ?.associate { it.name to (it.default ?: "") }
                 ?.takeIf { it.isNotEmpty() }?.also {
                     putLoginInfo(GSON.toJson(it))
                 }
-            return longinInfo?.toMutableMap() ?: mutableMapOf()
+            loginInfo?.toMutableMap() ?: mutableMapOf()
         }
-        return GSON.fromJsonObject<MutableMap<String, String>>(json).getOrNull() ?: mutableMapOf()
     }
 
     /**
@@ -326,17 +371,19 @@ interface BaseSource : JsExtensions {
         val bindings = buildScriptBindings { bindings ->
             bindings["java"] = this
             bindings["source"] = this
+            bindings["sourceApi"] = this
             bindings["baseUrl"] = getKey()
             bindings["cookie"] = CookieStore
             bindings["cache"] = CacheManager
             bindings.apply(bindingsConfig)
         }
-        val sharedScope = getShareScope()
+        val sharedGlobalStateKey = getSharedGlobalStateKey()
+        val sharedScope = getShareScope() ?: SharedJsScope.getCryptoScope(this, null)
         val scope = if (sharedScope == null) {
             RhinoScriptEngine.getRuntimeScope(bindings)
         } else {
             bindings.apply {
-                prototype = sharedScope
+                chainTo(sharedScope, sharedGlobalStateKey)
             }
         }
         return RhinoScriptEngine.eval(jsStr, scope)

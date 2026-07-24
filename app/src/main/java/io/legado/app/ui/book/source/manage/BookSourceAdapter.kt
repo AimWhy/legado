@@ -6,8 +6,6 @@ import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ImageView
-import android.widget.PopupMenu
-import androidx.core.os.bundleOf
 import androidx.core.view.doOnLayout
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
@@ -19,6 +17,7 @@ import io.legado.app.databinding.ItemBookSourceBinding
 import io.legado.app.lib.theme.backgroundColor
 import io.legado.app.model.Debug
 import io.legado.app.ui.login.SourceLoginActivity
+import io.legado.app.ui.widget.popupActionMenu
 import io.legado.app.ui.widget.recycler.DragSelectTouchHelper
 import io.legado.app.ui.widget.recycler.ItemTouchCallback
 import io.legado.app.utils.ColorUtils
@@ -61,6 +60,7 @@ class BookSourceAdapter(
                     && oldItem.enabled == newItem.enabled
                     && oldItem.enabledExplore == newItem.enabledExplore
                     && oldItem.hasExploreUrl == newItem.hasExploreUrl
+                    && oldItem.hasJs == newItem.hasJs
         }
 
         override fun getChangePayload(oldItem: BookSourcePart, newItem: BookSourcePart): Any? {
@@ -77,6 +77,9 @@ class BookSourceAdapter(
                 oldItem.hasExploreUrl != newItem.hasExploreUrl
             ) {
                 payload.putBoolean("upExplore", true)
+            }
+            if (oldItem.hasJs != newItem.hasJs) {
+                payload.putBoolean("upJs", true)
             }
             if (payload.isEmpty) {
                 return null
@@ -104,6 +107,7 @@ class BookSourceAdapter(
                 cbBookSource.isChecked = selected.contains(item)
                 upCheckSourceMessage(binding, item)
                 upShowExplore(ivExplore, item)
+                tvJsBadge.gone(!item.hasJs)
                 upSourceHost(binding, holder.layoutPosition)
             } else {
                 for (i in payloads.indices) {
@@ -113,6 +117,7 @@ class BookSourceAdapter(
                             "enabled" -> swtEnabled.isChecked = bundle.getBoolean("enabled")
                             "upName" -> cbBookSource.text = item.getDisPlayNameGroup()
                             "upExplore" -> upShowExplore(ivExplore, item)
+                            "upJs" -> tvJsBadge.gone(!item.hasJs)
                             "selected" -> cbBookSource.isChecked = selected.contains(item)
                             "checkSourceMessage" -> upCheckSourceMessage(binding, item)
                             "upSourceHost" -> upSourceHost(binding, holder.layoutPosition)
@@ -156,53 +161,50 @@ class BookSourceAdapter(
         callBack.upCountView()
         recyclerView.doOnLayout {
             handler.post {
-                notifyItemRangeChanged(0, itemCount, bundleOf("upSourceHost" to null))
+                notifyItemRangeChanged(0, itemCount, Bundle().apply {
+                    putString("upSourceHost", null)
+                })
             }
         }
     }
 
     private fun showMenu(view: View, position: Int) {
         val source = getItem(position) ?: return
-        val popupMenu = PopupMenu(context, view)
-        popupMenu.inflate(R.menu.book_source_item)
-        popupMenu.menu.findItem(R.id.menu_top).isVisible = callBack.sort == BookSourceSort.Default
-        popupMenu.menu.findItem(R.id.menu_bottom).isVisible =
-            callBack.sort == BookSourceSort.Default
-        val qyMenu = popupMenu.menu.findItem(R.id.menu_enable_explore)
-        if (!source.hasExploreUrl) {
-            qyMenu.isVisible = false
-        } else {
-            if (source.enabledExplore) {
-                qyMenu.setTitle(R.string.disable_explore)
-            } else {
-                qyMenu.setTitle(R.string.enable_explore)
-            }
-        }
-        val loginMenu = popupMenu.menu.findItem(R.id.menu_login)
-        loginMenu.isVisible = source.hasLoginUrl
-        popupMenu.setOnMenuItemClickListener { menuItem ->
-            when (menuItem.itemId) {
-                R.id.menu_top -> callBack.toTop(source)
-                R.id.menu_bottom -> callBack.toBottom(source)
-                R.id.menu_login -> context.startActivity<SourceLoginActivity> {
+        popupActionMenu(context) {
+            val defaultOrder = callBack.sort == BookSourceSort.Default
+            item(context.getString(R.string.to_top), "top", defaultOrder)
+            item(context.getString(R.string.to_bottom), "bottom", defaultOrder)
+            item(context.getString(R.string.login), "login", source.hasLoginUrl)
+            item(context.getString(R.string.search), "search")
+            item(context.getString(R.string.debug), "debug")
+            item(context.getString(R.string.delete), "delete")
+            item(
+                context.getString(
+                    if (source.enabledExplore) R.string.disable_explore else R.string.enable_explore
+                ),
+                "toggleExplore",
+                source.hasExploreUrl
+            )
+            danger("delete")
+        }.show(view) { action ->
+            when (action) {
+                "top" -> callBack.toTop(source)
+                "bottom" -> callBack.toBottom(source)
+                "login" -> context.startActivity<SourceLoginActivity> {
                     putExtra("type", "bookSource")
                     putExtra("key", source.bookSourceUrl)
                 }
 
-                R.id.menu_search -> callBack.searchBook(source)
-                R.id.menu_debug_source -> callBack.debug(source)
-                R.id.menu_del -> {
+                "search" -> callBack.searchBook(source)
+                "debug" -> callBack.debug(source)
+                "delete" -> {
                     callBack.del(source)
                     selected.remove(source)
                 }
 
-                R.id.menu_enable_explore -> {
-                    callBack.enableExplore(!source.enabledExplore, source)
-                }
+                "toggleExplore" -> callBack.enableExplore(!source.enabledExplore, source)
             }
-            true
         }
-        popupMenu.show()
     }
 
     private fun upShowExplore(iv: ImageView, source: BookSourcePart) {
@@ -257,7 +259,9 @@ class BookSourceAdapter(
         getItems().forEach {
             selected.add(it)
         }
-        notifyItemRangeChanged(0, itemCount, bundleOf(Pair("selected", null)))
+        notifyItemRangeChanged(0, itemCount, Bundle().apply {
+            putString("selected", null)
+        })
         callBack.upCountView()
     }
 
@@ -269,7 +273,9 @@ class BookSourceAdapter(
                 selected.add(it)
             }
         }
-        notifyItemRangeChanged(0, itemCount, bundleOf(Pair("selected", null)))
+        notifyItemRangeChanged(0, itemCount, Bundle().apply {
+            putString("selected", null)
+        })
         callBack.upCountView()
     }
 
@@ -288,7 +294,9 @@ class BookSourceAdapter(
                 selected.add(it)
             }
         }
-        notifyItemRangeChanged(minPosition, itemCount, bundleOf(Pair("selected", null)))
+        notifyItemRangeChanged(minPosition, itemCount, Bundle().apply {
+            putString("selected", null)
+        })
         callBack.upCountView()
     }
 
@@ -355,7 +363,9 @@ class BookSourceAdapter(
                     } else {
                         selected.remove(it)
                     }
-                    notifyItemChanged(position, bundleOf(Pair("selected", null)))
+                    notifyItemChanged(position, Bundle().apply {
+                        putString("selected", null)
+                    })
                     callBack.upCountView()
                     return true
                 }

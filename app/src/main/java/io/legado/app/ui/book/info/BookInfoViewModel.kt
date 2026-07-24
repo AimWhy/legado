@@ -75,6 +75,23 @@ internal fun normalizeWebFileName(
     }
 }
 
+internal class BookInfoNetworkLoadingCounter(
+    private val onLoadingChanged: (Boolean) -> Unit,
+) {
+    private var activeLoads = 0
+
+    @Synchronized
+    fun begin() {
+        if (activeLoads++ == 0) onLoadingChanged(true)
+    }
+
+    @Synchronized
+    fun end() {
+        check(activeLoads > 0) { "No active network load" }
+        if (--activeLoads == 0) onLoadingChanged(false)
+    }
+}
+
 class BookInfoViewModel(application: Application) : BaseViewModel(application) {
     val bookData = MutableLiveData<Book>()
     val chapterListData = MutableLiveData<List<BookChapter>>()
@@ -84,7 +101,14 @@ class BookInfoViewModel(application: Application) : BaseViewModel(application) {
     var bookSource: BookSource? = null
     private var changeSourceCoroutine: Coroutine<*>? = null
     val waitDialogData = MutableLiveData<Boolean>()
+    val loadingData = MutableLiveData<Boolean>()
+    private val networkLoadingCounter = BookInfoNetworkLoadingCounter(loadingData::postValue)
     val actionLive = MutableLiveData<String>()
+
+    private fun <T> Coroutine<T>.trackNetworkLoading(): Coroutine<T> = apply {
+        networkLoadingCounter.begin()
+        invokeOnCompletion { networkLoadingCounter.end() }
+    }
 
     fun initData(intent: Intent) {
         execute {
@@ -214,7 +238,7 @@ class BookInfoViewModel(application: Application) : BaseViewModel(application) {
             loadChapter(book)
         } else {
             val bookSource = bookSource ?: let {
-                chapterListData.postValue(emptyList())
+                chapterListData.postValue(chapterListData.value.orEmpty())
                 context.toastOnUi(R.string.error_no_source)
                 return
             }
@@ -240,9 +264,11 @@ class BookInfoViewModel(application: Application) : BaseViewModel(application) {
                         loadChapter(it, runPreUpdateJs, isFromBookInfo = true)
                     }
                 }.onError {
+                    chapterListData.postValue(chapterListData.value.orEmpty())
                     AppLog.put("获取书籍信息失败\n${it.localizedMessage}", it)
                     context.toastOnUi(R.string.error_get_book_info)
                 }
+                .trackNetworkLoading()
         }
     }
 
@@ -263,16 +289,23 @@ class BookInfoViewModel(application: Application) : BaseViewModel(application) {
                     chapterListData.postValue(it)
                 }
             }.onError {
+                chapterListData.postValue(chapterListData.value.orEmpty())
                 context.toastOnUi("LoadTocError:${it.localizedMessage}")
             }
         } else {
             val bookSource = bookSource ?: let {
-                chapterListData.postValue(emptyList())
+                chapterListData.postValue(chapterListData.value.orEmpty())
                 context.toastOnUi(R.string.error_no_source)
                 return
             }
             val oldBook = book.copy()
-            WebBook.getChapterList(scope, bookSource, book, runPreUpdateJs, isFromBookInfo = isFromBookInfo)
+            WebBook.getChapterList(
+                scope,
+                bookSource,
+                book,
+                runPreUpdateJs,
+                isFromBookInfo = isFromBookInfo,
+            )
                 .onSuccess(IO) {
                     if (inBookshelf) {
                         book.removeType(BookType.updateError)
@@ -290,10 +323,11 @@ class BookInfoViewModel(application: Application) : BaseViewModel(application) {
                     bookData.postValue(book)
                     chapterListData.postValue(it)
                 }.onError {
-                    chapterListData.postValue(emptyList())
+                    chapterListData.postValue(chapterListData.value.orEmpty())
                     AppLog.put("获取目录失败\n${it.localizedMessage}", it)
                     context.toastOnUi(R.string.error_get_chapter_list)
                 }
+                .trackNetworkLoading()
         }
     }
 
@@ -328,6 +362,7 @@ class BookInfoViewModel(application: Application) : BaseViewModel(application) {
                 )
             }
         }.onError {
+            chapterListData.postValue(emptyList())
             context.toastOnUi("LoadWebFileError\n${it.localizedMessage}")
         }.onSuccess {
             webFiles.addAll(it)

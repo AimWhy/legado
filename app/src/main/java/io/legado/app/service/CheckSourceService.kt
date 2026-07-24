@@ -41,7 +41,8 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
-import org.mozilla.javascript.WrappedException
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import org.htmlunit.corejs.javascript.WrappedException
 import splitties.init.appCtx
 import splitties.systemservices.notificationManager
 import java.net.InetSocketAddress
@@ -49,6 +50,14 @@ import java.net.Socket
 import java.net.URI
 import java.util.concurrent.Executors
 import kotlin.math.min
+
+internal fun parseCheckSourceEndpoint(domain: String): Pair<String, Int>? {
+    val rawUrl = domain.substringBefore('#')
+    val uri = kotlin.runCatching { URI(rawUrl) }.getOrNull() ?: return null
+    if (uri.rawAuthority.isNullOrBlank()) return null
+    val url = rawUrl.toHttpUrlOrNull() ?: return null
+    return url.host to url.port
+}
 
 /**
  * 校验书源
@@ -156,13 +165,12 @@ class CheckSourceService : BaseService() {
         source.respondTime = Debug.getRespondTime(source.bookSourceUrl)
     }
 
-    private suspend fun isDomainReachable(domain: String): Boolean {
+    private suspend fun isDomainReachable(endpoint: Pair<String, Int>): Boolean {
         return kotlin.runCatching {
             withTimeout(2000) {
-                val url = URI(domain.substringBefore("#"))
-                val port = url.port.takeIf { it > 0 } ?: 80
+                val (host, port) = endpoint
                 Socket().use { socket ->
-                    socket.connect(InetSocketAddress(url.host, port), 1600)
+                    socket.connect(InetSocketAddress(host, port), 1600)
                     true
                 }
             }
@@ -178,10 +186,10 @@ class CheckSourceService : BaseService() {
         //检测源地址可访问性
         if (CheckSource.checkDomain) {
             val domain = source.bookSourceUrl
-            if (!domain.startsWith("http", ignoreCase = true)) {
+            val endpoint = parseCheckSourceEndpoint(domain)
+            if (endpoint == null) {
                 throw NoStackTraceException("源地址不是http链接")
-            }
-            else if (isDomainReachable(domain)) {
+            } else if (isDomainReachable(endpoint)) {
                 source.removeGroup("域名失效")
             } else {
                 source.addGroup("域名失效")
@@ -191,7 +199,7 @@ class CheckSourceService : BaseService() {
         //校验搜索书籍
         if (CheckSource.checkSearch) {
             val searchWord = source.getCheckKeyword(CheckSource.keyword)
-            if (!source.searchUrl.isNullOrBlank()) {
+            if (source.isJsSource() || !source.searchUrl.isNullOrBlank()) {
                 source.removeGroup("搜索链接规则为空")
                 val searchBooks = WebBook.searchBookAwait(source, searchWord)
                 if (searchBooks.isEmpty()) {
@@ -244,11 +252,10 @@ class CheckSourceService : BaseService() {
                 return
             }
             //校验目录
-            val toc = WebBook.getChapterListAwait(source, book).getOrThrow().asSequence()
-                .filter { !(it.isVolume && it.url.startsWith(it.title)) }
-                .take(2)
-                .toList()
-            val nextChapterUrl = toc.getOrNull(1)?.url ?: toc.first().url
+            val chapterSelection = selectCheckSourceChapter(
+                chapters = WebBook.getChapterListAwait(source, book).getOrThrow(),
+                emptyMessage = getString(R.string.chapter_list_empty),
+            )
             if (!CheckSource.checkContent) {
                 return
             }
@@ -256,8 +263,8 @@ class CheckSourceService : BaseService() {
             WebBook.getContentAwait(
                 bookSource = source,
                 book = book,
-                bookChapter = toc.first(),
-                nextChapterUrl = nextChapterUrl,
+                bookChapter = chapterSelection.chapter,
+                nextChapterUrl = chapterSelection.nextChapterUrl,
                 needSave = false
             )
         }.onFailure {

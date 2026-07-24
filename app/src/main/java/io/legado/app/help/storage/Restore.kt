@@ -10,6 +10,7 @@ import io.legado.app.constant.AppConst.androidId
 import io.legado.app.constant.AppLog
 import io.legado.app.constant.PreferKey
 import io.legado.app.data.appDb
+import io.legado.app.data.entities.AutoTaskRule
 import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookGroup
 import io.legado.app.data.entities.BookSource
@@ -35,12 +36,14 @@ import io.legado.app.help.config.ThemeConfig
 import io.legado.app.model.VideoPlay.VIDEO_PREF_NAME
 import io.legado.app.model.BookCover
 import io.legado.app.model.localBook.LocalBook
+import io.legado.app.service.AutoTaskScheduler
 import io.legado.app.utils.ACache
 import io.legado.app.utils.FileUtils
 import io.legado.app.utils.GSON
 import io.legado.app.utils.LogUtils
 import io.legado.app.utils.compress.ZipUtils
 import io.legado.app.utils.defaultSharedPreferences
+import io.legado.app.utils.externalFiles
 import io.legado.app.utils.fromJsonArray
 import io.legado.app.utils.getPrefBoolean
 import io.legado.app.utils.getPrefInt
@@ -100,6 +103,7 @@ object Restore {
 
     private suspend fun restore(path: String) {
         val aes = BackupAES()
+        val restoredAutoTasks = fileToListT<AutoTaskRule>(path, "autoTask.json")
         fileToListT<Book>(path, "bookshelf.json")?.let {
             it.forEach { book ->
                 book.upType()
@@ -298,6 +302,20 @@ object Restore {
             hideNavigationBar = appCtx.getPrefBoolean(PreferKey.hideNavigationBar)
             autoReadSpeed = appCtx.getPrefInt(PreferKey.autoReadSpeed, 46)
         }
+        restoreBackupMediaDirectory(File(path), appCtx.externalFiles, "covers")
+            .onFailure {
+                AppLog.put("恢复封面图片出错\n${it.localizedMessage}", it)
+            }
+        if (!BackupConfig.ignoreReadConfig) {
+            restoreBackupMediaDirectory(File(path), appCtx.externalFiles, "bg")
+                .onFailure {
+                    AppLog.put("恢复阅读背景图片出错\n${it.localizedMessage}", it)
+                }
+        }
+        if (!restoredAutoTasks.isNullOrEmpty()) {
+            appDb.autoTaskRuleDao.upsert(*restoredAutoTasks.toTypedArray())
+        }
+        AutoTaskScheduler.refresh(appCtx)
         appCtx.toastOnUi(R.string.restore_success)
         withContext(Main) {
             delay(100)

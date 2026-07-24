@@ -1,7 +1,6 @@
 package io.legado.app.ui.rss.source.manage
 
 import android.app.Application
-import android.text.TextUtils
 import io.legado.app.base.BaseViewModel
 import io.legado.app.data.appDb
 import io.legado.app.data.entities.RssSource
@@ -10,7 +9,7 @@ import io.legado.app.help.source.SourceHelp
 import io.legado.app.utils.FileUtils
 import io.legado.app.utils.GSON
 import io.legado.app.utils.normalizeFileName
-import io.legado.app.utils.splitNotBlank
+import io.legado.app.utils.renameGroupExact
 import io.legado.app.utils.stackTraceStr
 import io.legado.app.utils.toastOnUi
 import java.io.File
@@ -133,33 +132,18 @@ class RssSourceViewModel(application: Application) : BaseViewModel(application) 
 
     fun upGroup(oldGroup: String, newGroup: String?) {
         execute {
-            val sources = appDb.rssSourceDao.getByGroup(oldGroup)
-            sources.forEach { source ->
-                source.sourceGroup?.splitNotBlank(",")?.toHashSet()?.let {
-                    it.remove(oldGroup)
-                    if (!newGroup.isNullOrEmpty())
-                        it.add(newGroup)
-                    source.sourceGroup = TextUtils.join(",", it)
+            val sources = appDb.rssSourceDao.getByGroup(oldGroup).mapNotNull { source ->
+                source.sourceGroup.renameGroupExact(oldGroup, newGroup)?.let { groups ->
+                    source.apply { sourceGroup = groups }
                 }
             }
-            appDb.rssSourceDao.update(*sources.toTypedArray())
-        }
-    }
-
-    fun delGroup(group: String) {
-        execute {
-            execute {
-                val sources = appDb.rssSourceDao.getByGroup(group)
-                sources.forEach { source ->
-                    source.sourceGroup?.splitNotBlank(",")?.toHashSet()?.let {
-                        it.remove(group)
-                        source.sourceGroup = TextUtils.join(",", it)
-                    }
-                }
+            if (sources.isNotEmpty()) {
                 appDb.rssSourceDao.update(*sources.toTypedArray())
             }
         }
     }
+
+    fun delGroup(group: String) = upGroup(group, null)
 
     fun importDefault() {
         execute {

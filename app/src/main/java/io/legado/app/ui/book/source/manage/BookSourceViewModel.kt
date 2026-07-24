@@ -1,7 +1,6 @@
 package io.legado.app.ui.book.source.manage
 
 import android.app.Application
-import android.text.TextUtils
 import io.legado.app.R
 import io.legado.app.base.BaseViewModel
 import io.legado.app.data.appDb
@@ -14,7 +13,7 @@ import io.legado.app.utils.GSON
 import io.legado.app.utils.cnCompare
 import io.legado.app.utils.normalizeFileName
 import io.legado.app.utils.outputStream
-import io.legado.app.utils.splitNotBlank
+import io.legado.app.utils.renameGroupExact
 import io.legado.app.utils.stackTraceStr
 import io.legado.app.utils.toastOnUi
 import io.legado.app.utils.writeToOutputStream
@@ -128,15 +127,23 @@ class BookSourceViewModel(application: Application) : BaseViewModel(application)
 
     private fun saveToFile(sources: List<BookSource>, name: String, success: (file: File, name: String) -> Unit) {
         execute {
-            val path = "${context.filesDir}/shareBookSource.json"
-            FileUtils.delete(path)
-            val file = FileUtils.createFileWithReplace(path)
-            file.outputStream().buffered().use {
-                GSON.writeToOutputStream(it, sources)
+            val single = sources.singleOrNull()
+            if (single != null && single.isJsSource()) {
+                val outputName = "${single.bookSourceName.normalizeFileName()}.js"
+                val file = File(context.cacheDir, outputName)
+                file.writeText(single.mainJs.orEmpty())
+                file to outputName
+            } else {
+                val path = "${context.filesDir}/shareBookSource.json"
+                FileUtils.delete(path)
+                val file = FileUtils.createFileWithReplace(path)
+                file.outputStream().buffered().use {
+                    GSON.writeToOutputStream(it, sources)
+                }
+                file to name
             }
-            file
         }.onSuccess {
-            success.invoke(it, name)
+            success.invoke(it.first, it.second)
         }.onError {
             context.toastOnUi(it.stackTraceStr)
         }
@@ -270,29 +277,17 @@ class BookSourceViewModel(application: Application) : BaseViewModel(application)
 
     fun upGroup(oldGroup: String, newGroup: String?) {
         execute {
-            val sources = appDb.bookSourceDao.getByGroup(oldGroup)
-            sources.forEach { source ->
-                source.bookSourceGroup?.splitNotBlank(",")?.toHashSet()?.let {
-                    it.remove(oldGroup)
-                    if (!newGroup.isNullOrEmpty())
-                        it.add(newGroup)
-                    source.bookSourceGroup = TextUtils.join(",", it)
+            val sources = appDb.bookSourceDao.getByGroup(oldGroup).mapNotNull { source ->
+                source.bookSourceGroup.renameGroupExact(oldGroup, newGroup)?.let { groups ->
+                    source.apply { bookSourceGroup = groups }
                 }
             }
-            appDb.bookSourceDao.update(*sources.toTypedArray())
-        }
-    }
-
-    fun delGroup(group: String) {
-        execute {
-            execute {
-                val sources = appDb.bookSourceDao.getByGroup(group)
-                sources.forEach { source ->
-                    source.removeGroup(group)
-                }
+            if (sources.isNotEmpty()) {
                 appDb.bookSourceDao.update(*sources.toTypedArray())
             }
         }
     }
+
+    fun delGroup(group: String) = upGroup(group, null)
 
 }

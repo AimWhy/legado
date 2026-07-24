@@ -15,6 +15,8 @@ import io.legado.app.help.config.AppConfig
 import io.legado.app.lib.dialogs.alert
 import io.legado.app.lib.permission.Permissions
 import io.legado.app.lib.permission.PermissionsCompat
+import io.legado.app.model.localBook.LocalBook
+import io.legado.app.ui.autoTask.ImportAutoTaskDialog
 import io.legado.app.ui.file.HandleFileContract
 import io.legado.app.utils.FileUtils
 import io.legado.app.utils.buildMainHandler
@@ -65,12 +67,14 @@ class FileAssociationActivity :
             importBook(uri)
         }
         viewModel.onLineImportLive.observe(this) {
+            binding.rotateLoading.gone()
             startActivity<OnLineImportActivity> {
                 data = it
             }
             finish()
         }
         viewModel.successLive.observe(this) {
+            binding.rotateLoading.gone()
             when (it.first) {
                 "bookSource" -> showDialogFragment(ImportBookSourceDialog(it.second, true))
                 "rssSource" -> showDialogFragment(ImportRssSourceDialog(it.second, true))
@@ -79,6 +83,7 @@ class FileAssociationActivity :
                 "theme" -> showDialogFragment(ImportThemeDialog(it.second, true))
                 "txtRule" -> showDialogFragment(ImportTxtTocRuleDialog(it.second, true))
                 "dictRule" -> showDialogFragment(ImportDictRuleDialog(it.second, true))
+                "autoTask" -> showDialogFragment(ImportAutoTaskDialog(it.second, true))
             }
         }
         viewModel.errorLive.observe(this) {
@@ -120,6 +125,7 @@ class FileAssociationActivity :
                     .onGranted {
                         viewModel.dispatchIntent(data)
                     }.onDenied {
+                        binding.rotateLoading.gone()
                         toastOnUi("请求存储权限失败。")
                         handler.postDelayed(2000) {
                             finish()
@@ -133,6 +139,7 @@ class FileAssociationActivity :
         if (uri.isContentScheme()) {
             val treeUriStr = AppConfig.defaultBookTreeUri
             if (treeUriStr.isNullOrEmpty()) {
+                binding.rotateLoading.gone()
                 localBookTreeSelect.launch {
                     title = getString(R.string.select_book_folder)
                     mode = HandleFileContract.DIR_SYS
@@ -146,6 +153,7 @@ class FileAssociationActivity :
     }
 
     private fun importBook(treeUri: Uri?, uri: Uri) {
+        binding.rotateLoading.visible()
         lifecycleScope.launch {
             runCatching {
                 withContext(IO) {
@@ -169,9 +177,11 @@ class FileAssociationActivity :
                                             "请重新设置书籍保存位置\nPermission Denial"
                                         )
                                 }
-                                contentResolver.openOutputStream(doc.uri)!!.use { oStream ->
-                                    inputStream.copyTo(oStream)
-                                    oStream.flush()
+                                LocalBook.withParserCacheInvalidated(doc.uri, name) {
+                                    contentResolver.openOutputStream(doc.uri)!!.use { oStream ->
+                                        inputStream.copyTo(oStream)
+                                        oStream.flush()
+                                    }
                                 }
                             }
                             viewModel.importBook(doc.uri)
@@ -187,9 +197,11 @@ class FileAssociationActivity :
                             val name = fileDoc.name
                             val file = treeFile.getFile(name)
                             if (!file.exists() || fileDoc.lastModified > file.lastModified()) {
-                                FileOutputStream(file).use { oStream ->
-                                    inputStream.copyTo(oStream)
-                                    oStream.flush()
+                                LocalBook.withParserCacheInvalidated(Uri.fromFile(file), name) {
+                                    FileOutputStream(file).use { oStream ->
+                                        inputStream.copyTo(oStream)
+                                        oStream.flush()
+                                    }
                                 }
                             }
                             viewModel.importBook(Uri.fromFile(file))
@@ -197,6 +209,7 @@ class FileAssociationActivity :
                     }
                 }
             }.onFailure {
+                binding.rotateLoading.gone()
                 when (it) {
                     is InvalidBooksDirException -> localBookTreeSelect.launch {
                         title = getString(R.string.select_book_folder)

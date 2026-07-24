@@ -1,10 +1,13 @@
 package io.legado.app.ui.book.source.edit
 
 import android.content.Intent
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.view.Menu
 import android.view.MenuItem
+import android.view.View
+import android.widget.AdapterView
 import android.widget.EditText
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
@@ -20,9 +23,11 @@ import io.legado.app.data.entities.BookSource
 import io.legado.app.data.entities.rule.BookInfoRule
 import io.legado.app.data.entities.rule.ContentRule
 import io.legado.app.data.entities.rule.ExploreRule
+import io.legado.app.data.entities.rule.ReviewRule
 import io.legado.app.data.entities.rule.SearchRule
 import io.legado.app.data.entities.rule.TocRule
 import io.legado.app.databinding.ActivityBookSourceEditBinding
+import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.LocalConfig
 import io.legado.app.lib.dialogs.SelectItem
 import io.legado.app.lib.dialogs.alert
@@ -30,6 +35,7 @@ import io.legado.app.lib.dialogs.selector
 import io.legado.app.lib.theme.accentColor
 import io.legado.app.lib.theme.backgroundColor
 import io.legado.app.lib.theme.primaryColor
+import io.legado.app.lib.theme.transparentNavBar
 import io.legado.app.ui.about.AppLogDialog
 import io.legado.app.ui.book.search.SearchActivity
 import io.legado.app.ui.book.source.debug.BookSourceDebugActivity
@@ -37,6 +43,7 @@ import io.legado.app.ui.code.CodeEditActivity
 import io.legado.app.ui.file.HandleFileContract
 import io.legado.app.ui.login.SourceLoginActivity
 import io.legado.app.ui.qrcode.QrCodeResult
+import io.legado.app.ui.widget.code.EditSafety
 import io.legado.app.ui.widget.dialog.UrlOptionDialog
 import io.legado.app.ui.widget.dialog.VariableDialog
 import io.legado.app.ui.widget.keyboard.KeyboardToolPop
@@ -55,6 +62,7 @@ import io.legado.app.utils.shareWithQr
 import io.legado.app.utils.showDialogFragment
 import io.legado.app.utils.showHelp
 import io.legado.app.utils.startActivity
+import io.legado.app.utils.StartActivityContract
 import io.legado.app.utils.toastOnUi
 import io.legado.app.utils.viewbindingdelegate.viewBinding
 import kotlinx.coroutines.Dispatchers.IO
@@ -70,15 +78,28 @@ class BookSourceEditActivity :
     override val binding by viewBinding(ActivityBookSourceEditBinding::inflate)
     override val viewModel by viewModels<BookSourceEditViewModel>()
 
-    private val adapter by lazy { BookSourceEditAdapter() }
+    private val adapter by lazy { BookSourceEditAdapter(::openUnsafeTextEditor) }
     private val sourceEntities: ArrayList<EditEntity> = ArrayList()
     private val searchEntities: ArrayList<EditEntity> = ArrayList()
     private val exploreEntities: ArrayList<EditEntity> = ArrayList()
     private val infoEntities: ArrayList<EditEntity> = ArrayList()
     private val tocEntities: ArrayList<EditEntity> = ArrayList()
     private val contentEntities: ArrayList<EditEntity> = ArrayList()
+    private val reviewEntities: ArrayList<EditEntity> = ArrayList()
+    private var redirectJsSourceUrl: String? = null
+    private var pendingEditKey: String? = null
+    private var pendingEditTabPosition = 0
+    private var pendingResultAvailable = false
+    private var pendingResultText: String? = null
+    private var pendingResultCursor = -1
 
-    //    private val reviewEntities: ArrayList<EditEntity> = ArrayList()
+    private val jsSourceEdit = registerForActivityResult(
+        StartActivityContract(JsSourceEditActivity::class.java)
+    ) { result ->
+        setResult(result.resultCode, result.data)
+        super.finish()
+    }
+
     private val qrCodeResult = registerForActivityResult(QrCodeResult()) {
         it ?: return@registerForActivityResult
         viewModel.importSource(it) { source ->
@@ -99,16 +120,45 @@ class BookSourceEditActivity :
         KeyboardToolPop(this, lifecycleScope, binding.root, this)
     }
 
+    override fun onCreate(savedInstanceState: Bundle?) {
+        pendingEditKey = savedInstanceState?.getString(STATE_PENDING_EDIT_KEY)
+        pendingEditTabPosition = savedInstanceState?.getInt(STATE_PENDING_EDIT_TAB) ?: 0
+        redirectJsSourceUrl = intent.getStringExtra("sourceUrl")
+            ?.takeIf { appDb.bookSourceDao.hasJsSource(it) }
+        super.onCreate(savedInstanceState)
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString(STATE_PENDING_EDIT_KEY, pendingEditKey)
+        outState.putInt(STATE_PENDING_EDIT_TAB, pendingEditTabPosition)
+    }
+
     override fun onActivityCreated(savedInstanceState: Bundle?) {
+        redirectJsSourceUrl?.let { sourceUrl ->
+            if (savedInstanceState == null) {
+                jsSourceEdit.launch {
+                    putExtra("sourceUrl", sourceUrl)
+                }
+            }
+            return
+        }
         softKeyboardTool.attachToWindow(window)
         initView()
         viewModel.initData(intent) {
+            viewModel.bookSource?.takeIf { it.isJsSource() }?.let { source ->
+                jsSourceEdit.launch {
+                    putExtra("sourceUrl", source.bookSourceUrl)
+                }
+                return@initData
+            }
             upSourceView(viewModel.bookSource)
         }
     }
 
     override fun onPostCreate(savedInstanceState: Bundle?) {
         super.onPostCreate(savedInstanceState)
+        if (redirectJsSourceUrl != null) return
         if (!LocalConfig.ruleHelpVersionIsLast) {
             showHelp("ruleHelp")
         }
@@ -120,41 +170,83 @@ class BookSourceEditActivity :
     }
 
     override fun onMenuOpened(featureId: Int, menu: Menu): Boolean {
-        menu.findItem(R.id.menu_login)?.isVisible = !getSource().loginUrl.isNullOrBlank()
+        menu.findItem(R.id.menu_login)?.isVisible = getSource().hasLogin()
         menu.findItem(R.id.menu_auto_complete)?.isChecked = viewModel.autoComplete
         return super.onMenuOpened(featureId, menu)
     }
 
     private val textEditLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == RESULT_OK) {
-            val view = window.decorView.findFocus()
-            if (view is EditText) {
-                result.data?.getStringExtra("text")?.let {
-                    view.setText(it)
-                }
-                result.data?.getIntExtra("cursorPosition", -1)?.takeIf { it in 0 ..< view.text.length }?.let {
-                    view.setSelection(it)
-                }
-            } else {
-                toastOnUi(R.string.focus_lost_on_textbox)
-            }
+            pendingResultAvailable = true
+            pendingResultText = result.data?.getStringExtra("text")
+            pendingResultCursor = result.data?.getIntExtra("cursorPosition", -1) ?: -1
+            applyPendingEditResult()
+        } else {
+            clearPendingEditResult()
         }
     }
 
     private fun onFullEditClicked() {
         val view = window.decorView.findFocus()
         if (view is EditText) {
-            val hint = findParentTextInputLayout(view)?.hint?.toString()
-            val currentText = view.text.toString()
-            val intent = Intent(this, CodeEditActivity::class.java).apply {
-                putExtra("text", currentText)
-                putExtra("title", hint)
-                putExtra("cursorPosition", view.selectionStart)
+            val key = view.getTag(R.id.tag) as? String
+            val editEntity = key?.let {
+                findEditEntity(binding.tabLayout.selectedTabPosition, it)
             }
-            textEditLauncher.launch(intent)
+            if (editEntity != null) {
+                openTextEditor(editEntity, view.selectionStart)
+                return
+            }
         }
-        else {
-            toastOnUi(R.string.please_focus_cursor_on_textbox)
+        toastOnUi(R.string.please_focus_cursor_on_textbox)
+    }
+
+    private fun openUnsafeTextEditor(editEntity: EditEntity) {
+        openTextEditor(editEntity, 0)
+    }
+
+    private fun openTextEditor(editEntity: EditEntity, cursorPosition: Int) {
+        pendingEditTabPosition = binding.tabLayout.selectedTabPosition
+        pendingEditKey = editEntity.key
+        val intent = Intent(this, CodeEditActivity::class.java).apply {
+            putExtra("text", editEntity.value.orEmpty())
+            putExtra("title", editEntity.hint)
+            putExtra("cursorPosition", cursorPosition)
+        }
+        textEditLauncher.launch(intent)
+    }
+
+    private fun findEditEntity(tabPosition: Int, key: String): EditEntity? {
+        val entities = when (tabPosition) {
+            1 -> searchEntities
+            2 -> exploreEntities
+            3 -> infoEntities
+            4 -> tocEntities
+            5 -> contentEntities
+            6 -> reviewEntities
+            else -> sourceEntities
+        }
+        return entities.find { it.key == key }
+    }
+
+    private fun refreshEditedEntity(editEntity: EditEntity, cursorPosition: Int) {
+        val index = adapter.editEntities.indexOf(editEntity)
+        if (index < 0) return
+
+        adapter.notifyItemChanged(index)
+        if (
+            cursorPosition < 0 ||
+            EditSafety.isCombiningHeavy(editEntity.value.orEmpty()) ||
+            EditSafety.isTooLongForInline(editEntity.value.orEmpty())
+        ) return
+
+        binding.recyclerView.post {
+            val holder = binding.recyclerView.findViewHolderForAdapterPosition(index)
+                as? BookSourceEditAdapter.MyViewHolder
+            holder?.binding?.editText?.run {
+                requestFocus()
+                setSelection(cursorPosition.coerceIn(0, text.length))
+            }
         }
     }
 
@@ -204,6 +296,7 @@ class BookSourceEditActivity :
     }
 
     private fun initView() {
+        initOptionPanel()
         binding.tabLayout.addTab(binding.tabLayout.newTab().apply {
             setText(R.string.source_tab_base)
         })
@@ -222,6 +315,9 @@ class BookSourceEditActivity :
         binding.tabLayout.addTab(binding.tabLayout.newTab().apply {
             setText(R.string.source_tab_content)
         })
+        binding.tabLayout.addTab(binding.tabLayout.newTab().apply {
+            setText(R.string.source_tab_review)
+        })
         binding.recyclerView.setEdgeEffectColor(primaryColor)
         if (adapter.editEntityMaxLine < 999) {
             binding.recyclerView.layoutManager = NoChildScrollLinearLayoutManager(this) //启用后会阻止RecyclerView跟随光标滚动,行数少时,用的TextView跟随
@@ -232,7 +328,11 @@ class BookSourceEditActivity :
                 newFocus.postDelayed({ sendText("") }, 120)
             }
         }
-        binding.tabLayout.setBackgroundColor(backgroundColor)
+        val transparentBar = transparentNavBar && !AppConfig.isEInkMode
+        binding.tabLayout.setBackgroundColor(
+            if (transparentBar) Color.TRANSPARENT else backgroundColor
+        )
+        if (transparentBar) binding.tabLayout.elevation = 0f
         binding.tabLayout.setSelectedTabIndicatorColor(accentColor)
         binding.tabLayout.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
             override fun onTabReselected(tab: TabLayout.Tab?) {
@@ -254,6 +354,59 @@ class BookSourceEditActivity :
             softKeyboardTool.initialPadding = imeHeight
             windowInsets
         }
+    }
+
+    private fun initOptionPanel() {
+        binding.optionsHeader.setOnClickListener {
+            updateOptionPanel(binding.optionsContent.visibility != View.VISIBLE)
+        }
+        listOf(
+            binding.cbIsEnable,
+            binding.cbIsEnableExplore,
+            binding.cbIsEnableCookie,
+            binding.cbIsEnableReview,
+            binding.cbIsEventListener,
+            binding.cbIsCustomButton
+        ).forEach { checkBox ->
+            checkBox.setOnCheckedChangeListener { _, _ -> updateOptionPanel() }
+        }
+        binding.spType.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(
+                parent: AdapterView<*>?,
+                view: View?,
+                position: Int,
+                id: Long
+            ) = updateOptionPanel()
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = updateOptionPanel()
+        }
+        updateOptionPanel(false)
+    }
+
+    private fun updateOptionPanel(expanded: Boolean = binding.optionsContent.visibility == View.VISIBLE) {
+        binding.optionsContent.visibility = if (expanded) View.VISIBLE else View.GONE
+        binding.ivOptionsExpand.setImageResource(
+            if (expanded) R.drawable.ic_expand_less else R.drawable.ic_expand_more
+        )
+        val summary = mutableListOf(
+            binding.spType.selectedItem?.toString() ?: getString(R.string.book_type)
+        )
+        listOf(
+            getString(R.string.is_enable) to binding.cbIsEnable.isChecked,
+            getString(R.string.discovery) to binding.cbIsEnableExplore.isChecked,
+            getString(R.string.auto_save_cookie) to binding.cbIsEnableCookie.isChecked,
+            getString(R.string.review) to binding.cbIsEnableReview.isChecked,
+            getString(R.string.is_event_listener) to binding.cbIsEventListener.isChecked,
+            getString(R.string.custom_button) to binding.cbIsCustomButton.isChecked
+        ).forEach { (label, checked) ->
+            if (checked) summary.add(label)
+        }
+        binding.tvOptionsSummary.text = summary.joinToString(" | ")
+        val action = getString(
+            if (expanded) R.string.book_intro_collapse else R.string.book_intro_expand
+        )
+        binding.optionsHeader.contentDescription =
+            "${getString(R.string.setting)}, ${binding.tvOptionsSummary.text}, $action"
     }
 
     override fun finish() {
@@ -283,7 +436,7 @@ class BookSourceEditActivity :
             3 -> infoEntities
             4 -> tocEntities
             5 -> contentEntities
-//            6 -> reviewEntities
+            6 -> reviewEntities
             else -> sourceEntities
         }
         binding.recyclerView.scrollToPosition(0)
@@ -296,6 +449,7 @@ class BookSourceEditActivity :
             binding.cbIsEnable.isChecked = it.enabled
             binding.cbIsEnableExplore.isChecked = it.enabledExplore
             binding.cbIsEnableCookie.isChecked = it.enabledCookieJar ?: false
+            binding.cbIsEnableReview.isChecked = it.ruleReview?.enabled ?: false
             binding.spType.setSelection(
                 when (it.bookSourceType) {
                     BookSourceType.video -> 4
@@ -308,6 +462,7 @@ class BookSourceEditActivity :
             binding.cbIsEventListener.isChecked = it.eventListener
             binding.cbIsCustomButton.isChecked = it.customButton
         }
+        updateOptionPanel()
         // 基本信息
         sourceEntities.clear()
         sourceEntities.apply {
@@ -404,22 +559,51 @@ class BookSourceEditActivity :
             add(EditEntity("callBackJs", cr.callBackJs, R.string.rule_call_back))
         }
         // 段评
-//        val rr = bs.getReviewRule()
-//        reviewEntities.clear()
-//        reviewEntities.apply {
-//            add(EditEntity("reviewUrl", rr.reviewUrl, R.string.rule_review_url))
-//            add(EditEntity("avatarRule", rr.avatarRule, R.string.rule_avatar))
-//            add(EditEntity("contentRule", rr.contentRule, R.string.rule_review_content))
-//            add(EditEntity("postTimeRule", rr.postTimeRule, R.string.rule_post_time))
-//            add(EditEntity("reviewQuoteUrl", rr.reviewQuoteUrl, R.string.rule_review_quote))
-//            add(EditEntity("voteUpUrl", rr.voteUpUrl, R.string.review_vote_up))
-//            add(EditEntity("voteDownUrl", rr.voteDownUrl, R.string.review_vote_down))
-//            add(EditEntity("postReviewUrl", rr.postReviewUrl, R.string.post_review_url))
-//            add(EditEntity("postQuoteUrl", rr.postQuoteUrl, R.string.post_quote_url))
-//            add(EditEntity("deleteUrl", rr.deleteUrl, R.string.delete_review_url))
-//        }
+        val rr = bs.ruleReview ?: ReviewRule()
+        reviewEntities.clear()
+        reviewEntities.apply {
+            add(EditEntity("reviewSummaryUrl", rr.reviewSummaryUrl, R.string.rule_review_summary_url))
+            add(EditEntity("summaryListRule", rr.summaryListRule, R.string.rule_review_summary_list))
+            add(EditEntity("summaryParagraphIndexRule", rr.summaryParagraphIndexRule, R.string.rule_review_summary_id))
+            add(EditEntity("summaryCountRule", rr.summaryCountRule, R.string.rule_review_summary_count))
+            add(EditEntity("summaryParagraphDataRule", rr.summaryParagraphDataRule, R.string.rule_review_summary_key))
+
+            add(EditEntity("reviewDetailUrl", rr.reviewDetailUrl, R.string.rule_review_detail_url))
+            add(EditEntity("reviewDetailNextPageUrl", rr.reviewDetailNextPageUrl, R.string.rule_review_detail_next_url))
+            add(EditEntity("detailListRule", rr.detailListRule, R.string.rule_review_detail_list))
+            add(EditEntity("detailIdRule", rr.detailIdRule, R.string.rule_review_detail_id))
+            add(EditEntity("detailAvatarRule", rr.detailAvatarRule, R.string.rule_review_detail_avatar))
+            add(EditEntity("detailNameRule", rr.detailNameRule, R.string.rule_review_detail_name))
+            add(EditEntity("detailBadgeRule", rr.detailBadgeRule, R.string.rule_review_detail_badge))
+            add(EditEntity("detailContentRule", rr.detailContentRule, R.string.rule_review_detail_content))
+
+            add(EditEntity("replyListRule", rr.replyListRule, R.string.rule_review_reply_list))
+            add(EditEntity("replyIdRule", rr.replyIdRule, R.string.rule_review_reply_id))
+            add(EditEntity("replyAvatarRule", rr.replyAvatarRule, R.string.rule_review_reply_avatar))
+            add(EditEntity("replyNameRule", rr.replyNameRule, R.string.rule_review_reply_name))
+            add(EditEntity("replyBadgeRule", rr.replyBadgeRule, R.string.rule_review_reply_badge))
+            add(EditEntity("replyContentRule", rr.replyContentRule, R.string.rule_review_reply_content))
+        }
         binding.tabLayout.selectTab(binding.tabLayout.getTabAt(0))
         setEditEntities(0)
+        applyPendingEditResult()
+    }
+
+    private fun applyPendingEditResult() {
+        if (!pendingResultAvailable) return
+        val editEntity = pendingEditKey?.let {
+            findEditEntity(pendingEditTabPosition, it)
+        } ?: return
+        pendingResultText?.let { editEntity.value = it }
+        refreshEditedEntity(editEntity, pendingResultCursor)
+        clearPendingEditResult()
+    }
+
+    private fun clearPendingEditResult() {
+        pendingEditKey = null
+        pendingResultAvailable = false
+        pendingResultText = null
+        pendingResultCursor = -1
     }
 
     private fun getSource(): BookSource {
@@ -441,7 +625,8 @@ class BookSourceEditActivity :
         val bookInfoRule = BookInfoRule()
         val tocRule = TocRule()
         val contentRule = ContentRule()
-//        val reviewRule = ReviewRule()
+        val reviewRule = source.ruleReview?.copy() ?: ReviewRule()
+        reviewRule.enabled = binding.cbIsEnableReview.isChecked
         sourceEntities.forEach {
             it.value = it.value?.takeIf { s -> s.isNotBlank() }
             when (it.key) {
@@ -599,34 +784,40 @@ class BookSourceEditActivity :
                 "callBackJs" -> contentRule.callBackJs = it.value
             }
         }
-//        reviewEntities.forEach {
-//            when (it.key) {
-//                "reviewUrl" -> reviewRule.reviewUrl = it.value
-//                "avatarRule" -> reviewRule.avatarRule =
-//                    viewModel.ruleComplete(it.value, reviewRule.reviewUrl, 3)
-//
-//                "contentRule" -> reviewRule.contentRule =
-//                    viewModel.ruleComplete(it.value, reviewRule.reviewUrl)
-//
-//                "postTimeRule" -> reviewRule.postTimeRule =
-//                    viewModel.ruleComplete(it.value, reviewRule.reviewUrl)
-//
-//                "reviewQuoteUrl" -> reviewRule.reviewQuoteUrl =
-//                    viewModel.ruleComplete(it.value, reviewRule.reviewUrl, 2)
-//
-//                "voteUpUrl" -> reviewRule.voteUpUrl = it.value
-//                "voteDownUrl" -> reviewRule.voteDownUrl = it.value
-//                "postReviewUrl" -> reviewRule.postReviewUrl = it.value
-//                "postQuoteUrl" -> reviewRule.postQuoteUrl = it.value
-//                "deleteUrl" -> reviewRule.deleteUrl = it.value
-//            }
-//        }
+        reviewEntities.forEach {
+            it.value = it.value?.takeIf { value -> value.isNotBlank() }
+            when (it.key) {
+                "reviewSummaryUrl" -> reviewRule.reviewSummaryUrl = it.value
+                "summaryListRule" -> reviewRule.summaryListRule = it.value
+                "summaryParagraphIndexRule" -> reviewRule.summaryParagraphIndexRule = it.value
+                "summaryCountRule" -> reviewRule.summaryCountRule = it.value
+                "summaryParagraphDataRule" -> reviewRule.summaryParagraphDataRule = it.value
+                "reviewDetailUrl" -> reviewRule.reviewDetailUrl = it.value
+                "reviewDetailNextPageUrl" -> reviewRule.reviewDetailNextPageUrl = it.value
+                "detailListRule" -> reviewRule.detailListRule = it.value
+                "detailIdRule" -> reviewRule.detailIdRule = it.value
+                "detailAvatarRule" -> reviewRule.detailAvatarRule = it.value
+                "detailNameRule" -> reviewRule.detailNameRule = it.value
+                "detailBadgeRule" -> reviewRule.detailBadgeRule = it.value
+                "detailContentRule" -> reviewRule.detailContentRule = it.value
+                "replyListRule" -> reviewRule.replyListRule = it.value
+                "replyIdRule" -> reviewRule.replyIdRule = it.value
+                "replyAvatarRule" -> reviewRule.replyAvatarRule = it.value
+                "replyNameRule" -> reviewRule.replyNameRule = it.value
+                "replyBadgeRule" -> reviewRule.replyBadgeRule = it.value
+                "replyContentRule" -> reviewRule.replyContentRule = it.value
+            }
+        }
         source.ruleSearch = searchRule
         source.ruleExplore = exploreRule
         source.ruleBookInfo = bookInfoRule
         source.ruleToc = tocRule
         source.ruleContent = contentRule
-//        source.ruleReview = reviewRule
+        source.ruleReview = reviewRule.takeIf {
+            source.ruleReview != null || it.enabled || reviewEntities.any { entity ->
+                !entity.value.isNullOrBlank()
+            }
+        }
         return source
     }
 
@@ -762,6 +953,11 @@ class BookSourceEditActivity :
         if (editText is EditText) {
             editText.onTextContextMenuItem(android.R.id.redo)
         }
+    }
+
+    private companion object {
+        const val STATE_PENDING_EDIT_KEY = "pendingEditKey"
+        const val STATE_PENDING_EDIT_TAB = "pendingEditTab"
     }
 
 }

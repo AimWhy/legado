@@ -69,10 +69,7 @@ object WebViewPool {
     // 释放WebView回池
     @Synchronized
     fun release(pooledWebView: PooledWebView) {
-        if (inUsePool.remove(pooledWebView.id) == null) {
-            pooledWebView.realWebView.destroy()
-            return
-        }
+        if (inUsePool.remove(pooledWebView.id) == null) return
         // 重置WebView状态
         pooledWebView.realWebView.run {
             (parent as? ViewGroup)?.removeView(this)
@@ -81,6 +78,10 @@ object WebViewPool {
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
             stopLoading()
+            removeJavascriptInterface(WebJsExtensions.nameBasic)
+            removeJavascriptInterface(WebJsExtensions.nameJava)
+            removeJavascriptInterface(WebJsExtensions.nameSource)
+            removeJavascriptInterface(WebJsExtensions.nameCache)
             clearFocus() //清除焦点
             setOnLongClickListener(null)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {

@@ -78,6 +78,7 @@ object Backup {
             "httpTTS.json",
             "keyboardAssists.json",
             "dictRule.json",
+            "autoTask.json",
             "servers.json",
             DirectLinkUpload.ruleFileName,
             ReadBookConfig.configFileName,
@@ -151,6 +152,7 @@ object Backup {
         writeListToJson(appDb.httpTTSDao.all, "httpTTS.json", backupPath)
         writeListToJson(appDb.keyboardAssistsDao.all, "keyboardAssists.json", backupPath)
         writeListToJson(appDb.dictRuleDao.all, "dictRule.json", backupPath)
+        writeListToJson(appDb.autoTaskRuleDao.all(), "autoTask.json", backupPath)
         GSON.toJson(appDb.serverDao.all).let { json ->
             aes.runCatching {
                 encryptBase64(json)
@@ -224,6 +226,7 @@ object Backup {
         for (i in 0 until paths.size) {
             paths[i] = backupPath + File.separator + paths[i]
         }
+        paths.addAll(findBackupMediaDirectories(appCtx.externalFiles).map { it.absolutePath })
         FileUtils.delete(zipFilePath)
         FileUtils.delete(zipFilePath.replace("tmp_", ""))
         val backupFileName = if (AppConfig.onlyLatestBackup) {
